@@ -233,16 +233,19 @@
     {}
     (keys (:tasks env)))})
 
+(def job
+  {:workflow [[:in :inc] [:inc :out]]
+   :catalog [{:onyx/name :in
+              :onyx/type :input}
+             {:onyx/name :inc
+              :onyx/type :function
+              :onyx/fn ::my-inc}
+             {:onyx/name :out
+              :onyx/type :output}]
+   :lifecycles []})
+
 (clojure.pprint/pprint
- (-> (init {:workflow [[:in :inc] [:inc :out]]
-            :catalog [{:onyx/name :in
-                       :onyx/type :input}
-                      {:onyx/name :inc
-                       :onyx/type :function
-                       :onyx/fn ::my-inc}
-                      {:onyx/name :out
-                       :onyx/type :output}]
-            :lifecycles []})
+ (-> (init job)
      (new-segment :in {:n 41})
      (new-segment :in {:n 84})
      (drain)
