@@ -2,6 +2,11 @@
 
 An alternative runtime for Onyx. Executes jobs in a pure, deterministic environment.
 
+## Goals
+
+- Target ClojureScript as an underlying execution environment.
+- Guarantee ordering.
+
 ## Usage
 
 ```clojure

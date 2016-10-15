@@ -3,6 +3,7 @@
             [onyx.static.util :refer [kw->fn]]
             [onyx.static.planning :refer [find-task]]
             [onyx.lifecycles.lifecycle-compile :as lc]
+            [onyx.flow-conditions.fc-compile :as fc]
             [onyx.peer.transform :as t]))
 
 ;;; Functions for example
@@ -10,7 +11,19 @@
 (defn my-inc [segment]
   (update-in segment [:n] inc))
 
+(defn segment-even? [event old new all-new]
+  (even? (:n new)))
+
 ;;;
+
+(defn takev [k xs]
+  (vec (take k xs)))
+
+(defn dropv [k xs]
+  (vec (drop k xs)))
+
+(defn mapcatv [f xs]
+  (vec (mapcat f xs)))
 
 (defn lifecycles->event-map
   [{:keys [onyx.core/lifecycles onyx.core/task] :as event}]
@@ -33,6 +46,16 @@
                 (assoc :compiled-handle-exception-fn
                        (lc/compile-handle-exception-functions lifecycles task))))))
 
+(defn flow-conditions->event-map
+  [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event}]
+  (update event
+          :onyx.core/compiled
+          (fn [compiled]
+            (-> compiled
+                (assoc :flow-conditions flow-conditions)
+                (assoc :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task))
+                (assoc :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task))))))
+
 (defn task-params->event-map [{:keys [onyx.core/task-map] :as event}]
   (let [params (map (fn [param] (get task-map param))
                     (:onyx/params task-map))]
@@ -44,7 +67,8 @@
    :lifecycle/before-batch :lifecycle/read-batch
    :lifecycle/read-batch :lifecycle/after-read-batch 
    :lifecycle/after-read-batch :lifecycle/apply-fn
-   :lifecycle/apply-fn :lifecycle/write-batch
+   :lifecycle/apply-fn :lifecycle/route-flow-conditions
+   :lifecycle/route-flow-conditions :lifecycle/write-batch
    :lifecycle/write-batch :lifecycle/after-batch
    :lifecycle/after-batch :lifecycle/before-batch
    :lifecycle/after-task-stop :lifecycle/start-task?})
@@ -75,8 +99,8 @@
   (let [size (:onyx/batch-size (:onyx.core/task-map event))]
     {:task
      (-> task
-         (assoc-in [:event :onyx.core/batch] (take size inbox))
-         (assoc :inbox (drop size inbox)))}))
+         (assoc-in [:event :onyx.core/batch] (takev size inbox))
+         (assoc :inbox (dropv size inbox)))}))
 
 (defmethod apply-action :lifecycle/after-read-batch
   [env task action]
@@ -90,19 +114,32 @@
     {:task
      (if (seq batch)
        (let [f (t/curry-params (:onyx.core/fn event) params)
-             results (mapcat (partial t/collect-next-segments f) batch)]
+             results (mapv
+                      (fn [old]
+                        (let [all-new (t/collect-next-segments f old)]
+                          {:old old :all-new all-new}))
+                      batch)]
          (assoc-in task [:event :onyx.core/results] results))
        task)}))
+
+(defmethod apply-action :lifecycle/route-flow-conditions
+  [env {:keys [event] :as task} action]
+  (let [{:keys [onyx.core/results onyx.core/compiled]} event]
+    (doseq [r results]
+;;      (prn r)
+      ;;(r/route-data event compiled r message)
+      ))
+  {:task task})
 
 (defmethod apply-action :lifecycle/write-batch
   [env {:keys [event children] :as task} action]
   (let [{:keys [onyx.core/results]} event]
     (cond (and (seq results) (seq children))
           {:task task
-           :writes (zipmap children (repeat results))}
+           :writes (zipmap children (repeat (mapcatv :all-new results)))}
 
           (seq results)
-          {:task (update-in task [:outputs] into results)
+          {:task (update-in task [:outputs] into (mapcatv :all-new results))
            :writes {}}
 
           :else
@@ -133,33 +170,37 @@
     (kw->fn f)
     clojure.core/identity))
 
-(defn init-task-state [graph lifecycles task-name catalog-entry]
+(defn init-task-state
+  [graph lifecycles flow-conditions task-name catalog-entry]
   (let [children (into #{} (dep/immediate-dependents graph task-name))
         base {:inbox []
               :start-task? false
               :children children
               :event (-> {:onyx.core/task task-name
                           :onyx.core/lifecycles lifecycles
+                          :onyx.core/flow-conditions flow-conditions
                           :onyx.core/task-map catalog-entry
                           :onyx.core/fn (precompile-onyx-fn catalog-entry)}
                          (lifecycles->event-map)
+                         (flow-conditions->event-map)
                          (task-params->event-map))}]
     (if (seq children)
       {task-name base}
       {task-name (assoc base :outputs [])})))
 
-(defn init-task-states [workflow catalog lifecycles graph]
+(defn init-task-states [workflow catalog lifecycles flow-conditions graph]
   (let [tasks (reduce into #{} workflow)]
     (apply merge
            (map
             (fn [task-name]
               (let [catalog-entry (find-task catalog task-name)]
-                (init-task-state graph lifecycles task-name catalog-entry)))
+                (init-task-state graph lifecycles flow-conditions
+                                 task-name catalog-entry)))
             tasks))))
 
-(defn init [{:keys [workflow catalog lifecycles] :as job}]
+(defn init [{:keys [workflow catalog lifecycles flow-conditions] :as job}]
   (let [graph (workflow->sierra-graph workflow)]
-    {:tasks (init-task-states workflow catalog lifecycles graph)
+    {:tasks (init-task-states workflow catalog lifecycles flow-conditions graph)
      :sorted-tasks (dep/topo-sort graph)
      :pending-writes {}
      :next-action :lifecycle/start-task?}))
@@ -265,7 +306,11 @@
              {:onyx/name :out
               :onyx/type :output
               :onyx/batch-size 1}]
-   :lifecycles []})
+   :lifecycles []
+   :flow-conditions
+   [{:flow/from :inc
+     :flow/to :out
+     :flow/predicate ::segment-even?}]})
 
 (clojure.pprint/pprint
  (-> (init job)
