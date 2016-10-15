@@ -3,7 +3,7 @@
             [onyx.static.util :refer [kw->fn]]
             [onyx.static.planning :refer [find-task]]
             [onyx.lifecycles.lifecycle-compile :as lc]
-            [onyx.peer.transform :refer [collect-next-segments]]))
+            [onyx.peer.transform :as t]))
 
 ;;; Functions for example
 
@@ -35,6 +35,11 @@
                        (lc/compile-after-task-functions lifecycles task))
                 (assoc :compiled-handle-exception-fn
                        (lc/compile-handle-exception-functions lifecycles task))))))
+
+(defn task-params->event-map [{:keys [onyx.core/task-map] :as event}]
+  (let [params (map (fn [param] (get task-map param))
+                    (:onyx/params task-map))]
+    (assoc event :onyx.core/params params)))
 
 (def action-sequence
   {:lifecycle/start-task? :lifecycle/before-task-start
@@ -84,11 +89,11 @@
 
 (defmethod apply-action :lifecycle/apply-fn
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/batch]} event]
+  (let [{:keys [onyx.core/batch onyx.core/params]} event]
     {:task
      (if (seq batch)
-       (let [f (:onyx.core/fn event)
-             results (mapcat (partial collect-next-segments f) batch)]
+       (let [f (t/curry-params (:onyx.core/fn event) params)
+             results (mapcat (partial t/collect-next-segments f) batch)]
          (assoc-in task [:event :onyx.core/results] results))
        task)}))
 
@@ -136,11 +141,12 @@
         base {:inbox []
               :start-task? false
               :children children
-              :event (lifecycles->event-map
-                      {:onyx.core/task task-name
-                       :onyx.core/lifecycles lifecycles
-                       :onyx.core/task-map catalog-entry
-                       :onyx.core/fn (precompile-onyx-fn catalog-entry)})}]
+              :event (-> {:onyx.core/task task-name
+                          :onyx.core/lifecycles lifecycles
+                          :onyx.core/task-map catalog-entry
+                          :onyx.core/fn (precompile-onyx-fn catalog-entry)}
+                         (lifecycles->event-map)
+                         (task-params->event-map))}]
     (if (seq children)
       {task-name base}
       {task-name (assoc base :outputs [])})))
