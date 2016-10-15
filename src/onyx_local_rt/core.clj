@@ -4,6 +4,7 @@
             [onyx.static.planning :refer [find-task]]
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
+            [onyx.flow-conditions.fc-routing :as r]
             [onyx.peer.transform :as t]))
 
 ;;; Functions for example
@@ -60,6 +61,9 @@
   (let [params (map (fn [param] (get task-map param))
                     (:onyx/params task-map))]
     (assoc event :onyx.core/params params)))
+
+(defn egress-ids->event-map [event children]
+  (assoc-in event [:onyx.core/compiled :egress-ids] children))
 
 (def action-sequence
   {:lifecycle/start-task? :lifecycle/before-task-start
@@ -124,23 +128,44 @@
 
 (defmethod apply-action :lifecycle/route-flow-conditions
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/compiled]} event]
-    (doseq [r results]
-;;      (prn r)
-      ;;(r/route-data event compiled r message)
-      ))
-  {:task task})
+  (let [{:keys [onyx.core/results onyx.core/compiled]} event
+        reified-results
+        (reduce
+         (fn [all {:keys [old all-new] :as outgoing-message}]
+           (let [leaves (mapv (partial hash-map :message) all-new)
+                 root {:message old}]
+             (reduce
+              (fn [all* new-msg]
+                (let [routes (r/route-data event compiled {:root root :leaves leaves} new-msg)
+                      transformed-msg (r/flow-conditions-transform new-msg routes event compiled)]
+                  (conj all* {:segment transformed-msg :routes (:flow routes)})))
+              all
+              all-new)))
+         []
+         results)]
+    {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
+
+(defn route-to-children [results]
+  (reduce
+   (fn [result {:keys [segment routes]}]
+     (reduce
+      (fn [result* route]
+        (update-in result* [route] (fnil conj []) segment))
+      result
+      routes))
+   {}
+   results))
 
 (defmethod apply-action :lifecycle/write-batch
   [env {:keys [event children] :as task} action]
   (let [{:keys [onyx.core/results]} event]
-    (cond (and (seq results) (seq children))
-          {:task task
-           :writes (zipmap children (repeat (mapcatv :all-new results)))}
+    (cond (not (seq children))
+          {:task (update-in task [:outputs] into (mapv :segment results))
+           :writes {}}
 
           (seq results)
-          {:task (update-in task [:outputs] into (mapcatv :all-new results))
-           :writes {}}
+          {:task task
+           :writes (route-to-children results)}
 
           :else
           {:task task
@@ -183,7 +208,8 @@
                           :onyx.core/fn (precompile-onyx-fn catalog-entry)}
                          (lifecycles->event-map)
                          (flow-conditions->event-map)
-                         (task-params->event-map))}]
+                         (task-params->event-map)
+                         (egress-ids->event-map children))}]
     (if (seq children)
       {task-name base}
       {task-name (assoc base :outputs [])})))
@@ -309,7 +335,7 @@
    :lifecycles []
    :flow-conditions
    [{:flow/from :inc
-     :flow/to :out
+     :flow/to [:out]
      :flow/predicate ::segment-even?}]})
 
 (clojure.pprint/pprint

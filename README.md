@@ -4,8 +4,14 @@ An alternative runtime for Onyx. Executes jobs in a pure, deterministic environm
 
 ## Goals
 
+- Offer a subset of the Distributed Runtime functionality in an easier-to-configure environment.
 - Target ClojureScript as an underlying execution environment.
 - Guarantee ordering.
+
+## Differences from the Distributed Runtime
+
+- `:onyx/group-by-key` and `:onyx/group-by-fn` have no effect.
+- There are no job or task schedulers.
 
 ## Usage
 
