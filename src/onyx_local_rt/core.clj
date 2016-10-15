@@ -12,9 +12,6 @@
 
 ;;;
 
-(defn restv [xs]
-  (or (vec (rest xs)) []))
-
 (defn lifecycles->event-map
   [{:keys [onyx.core/lifecycles onyx.core/task] :as event}]
   (update event
