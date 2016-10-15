@@ -216,15 +216,6 @@
 
            :else (recur (tick env) (inc i))))))
 
-(defn new-segment [env input-task segment]
-  (update-in env [:tasks input-task :inbox] conj segment))
-
-(defn stop [env]
-  (let [this-action :lifecycle/after-task-stop]
-    (-> env
-        (integrate-task-updates this-action)
-        (transition-action-sequence this-action))))
-
 (defn env-summary [env]
   {:next-action (:next-action env)
    :tasks
@@ -238,6 +229,29 @@
           (assoc result task-name {:inbox inbox}))))
     {}
     (keys (:tasks env)))})
+
+(defmulti transition-env
+  (fn [env action-data]
+    (:event action-data)))
+
+(defmethod transition-env :new-segment
+  [env {:keys [task segment]}]
+  (update-in env [:tasks task :inbox] conj segment))
+
+(defmethod transition-env :stop
+  [env action-data]
+  (let [this-action :lifecycle/after-task-stop]
+    (-> env
+        (integrate-task-updates this-action)
+        (transition-action-sequence this-action))))
+
+(defn new-segment [env input-task segment]
+  (transition-env env {:event :new-segment
+                       :task input-task
+                       :segment segment}))
+
+(defn stop [env]
+  (transition-env env {:event :stop}))
 
 (def job
   {:workflow [[:in :inc] [:inc :out]]
