@@ -1,6 +1,6 @@
 (ns onyx-local-rt.core
   (:require [com.stuartsierra.dependency :as dep]
-            [onyx.static.util :refer [kw->fn]]
+            [onyx.static.util :refer [kw->fn exception?]]
             [onyx.static.planning :refer [find-task]]
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
@@ -138,6 +138,9 @@
               (fn [all* new-msg]
                 (let [routes (r/route-data event compiled {:root root :leaves leaves} new-msg)
                       transformed-msg (r/flow-conditions-transform new-msg routes event compiled)]
+                  (when (and (exception? new-msg)
+                             (not (seq (:flow routes))))
+                    (throw new-msg))
                   (conj all* {:segment transformed-msg :routes (:flow routes)})))
               all
               all-new)))
