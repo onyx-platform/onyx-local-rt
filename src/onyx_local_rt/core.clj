@@ -2,7 +2,8 @@
   (:require [com.stuartsierra.dependency :as dep]
             [onyx.static.util :refer [kw->fn]]
             [onyx.static.planning :refer [find-task]]
-            [onyx.lifecycles.lifecycle-compile :as lc]))
+            [onyx.lifecycles.lifecycle-compile :as lc]
+            [onyx.peer.transform :refer [collect-next-segments]]))
 
 ;;; Functions for example
 
@@ -64,15 +65,16 @@
 (defmethod apply-action :lifecycle/before-batch
   [env task action]
   (let [f (get-in task [:event :onyx.core/compiled :compiled-before-batch-fn])
-        event (:event task)]
+        event (dissoc (:event task) :onyx.core/batch :onyx.core/results)]
     {:task (assoc task :event (merge event (f event)))}))
 
 (defmethod apply-action :lifecycle/read-batch
-  [env {:keys [inbox] :as task} action]
-  {:task
-   (-> task
-       (assoc :focused-segment (first inbox))
-       (assoc :inbox (restv inbox)))})
+  [env {:keys [inbox event] :as task} action]
+  (let [size (:onyx/batch-size (:onyx.core/task-map event))]
+    {:task
+     (-> task
+         (assoc-in [:event :onyx.core/batch] (take size inbox))
+         (assoc :inbox (drop size inbox)))}))
 
 (defmethod apply-action :lifecycle/after-read-batch
   [env task action]
@@ -81,32 +83,34 @@
     {:task (assoc task :event (merge event (f event)))}))
 
 (defmethod apply-action :lifecycle/apply-fn
-  [env {:keys [focused-segment event] :as task} action]
-  {:task
-   (if focused-segment
-     (update-in task [:focused-segment] (:onyx.core/fn event))
-     task)})
+  [env {:keys [event] :as task} action]
+  (let [{:keys [onyx.core/batch]} event]
+    {:task
+     (if (seq batch)
+       (let [f (:onyx.core/fn event)
+             results (mapcat (partial collect-next-segments f) batch)]
+         (assoc-in task [:event :onyx.core/results] results))
+       task)}))
 
 (defmethod apply-action :lifecycle/write-batch
-  [env {:keys [focused-segment children] :as task} action]
-  (cond (and focused-segment (seq children))
-        {:task (dissoc task :focused-segment)
-         :writes (zipmap children (repeat (vector focused-segment)))}
+  [env {:keys [event children] :as task} action]
+  (let [{:keys [onyx.core/results]} event]
+    (cond (and (seq results) (seq children))
+          {:task task
+           :writes (zipmap children (repeat results))}
 
-        focused-segment
-        {:task (-> task
-                   (dissoc :focused-segment)
-                   (update-in [:outputs] conj focused-segment))
-         :writes {}}
+          (seq results)
+          {:task (update-in task [:outputs] into results)
+           :writes {}}
 
-        :else
-        {:task task
-         :writes {}}))
+          :else
+          {:task task
+           :writes {}})))
 
 (defmethod apply-action :lifecycle/after-batch
   [env task action]
-  (let [f (get-in task [:event :onyx.core/compiled :compiled-after-batch-fn])
-        event (:event task)]
+  (let [event (:event task)
+        f (get-in event [:onyx.core/compiled :compiled-after-batch-fn])]
     {:task (assoc task :event (merge event (f event)))}))
 
 (defmethod apply-action :lifecycle/after-task-stop
@@ -131,7 +135,6 @@
   (let [children (into #{} (dep/immediate-dependents graph task-name))
         base {:inbox []
               :start-task? false
-              :focused-segment nil
               :children children
               :event (lifecycles->event-map
                       {:onyx.core/task task-name
@@ -194,9 +197,9 @@
 (defn drained? [env]
   (let [task-states (vals (:tasks env))
         inboxes (map :inbox task-states)
-        focused-segments (map :focused-segment task-states)]
+        batches (map (comp :onyx.core/batch :event) task-states)]
     (and (every? (comp not seq) inboxes)
-         (every? nil? focused-segments))))
+         (every? nil? batches))))
 
 (defn drain
   ([env] (drain env 10000))
@@ -204,7 +207,7 @@
    (loop [env env
           i 0]
      (cond (> i max-ticks)
-           (throw (ex-info (format "Ticked %s times and never drained, stopping." max-ticks) {}))
+           (throw (ex-info (format "Ticked %s times and never drained, runtime will not proceed with further execution." max-ticks) {}))
 
            (drained? env) env
 
@@ -236,12 +239,15 @@
 (def job
   {:workflow [[:in :inc] [:inc :out]]
    :catalog [{:onyx/name :in
-              :onyx/type :input}
+              :onyx/type :input
+              :onyx/batch-size 1}
              {:onyx/name :inc
               :onyx/type :function
-              :onyx/fn ::my-inc}
+              :onyx/fn ::my-inc
+              :onyx/batch-size 1}
              {:onyx/name :out
-              :onyx/type :output}]
+              :onyx/type :output
+              :onyx/batch-size 1}]
    :lifecycles []})
 
 (clojure.pprint/pprint
