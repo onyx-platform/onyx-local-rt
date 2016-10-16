@@ -31,6 +31,21 @@
 (defn unqualify-map [m]
   (into {} (map (fn [[k v]] [(keyword (name k)) v]) m)))
 
+(defn resolve-aggregation-calls [s]
+  (let [kw (if (sequential? s) (first s) s)]
+    (var-get (kw->fn kw))))
+
+(defn task-map->grouping-fn [task-map]
+  (if-let [group-key (:onyx/group-by-key task-map)]
+    (cond (keyword? group-key)
+          group-key
+          (sequential? group-key)
+          #(select-keys % group-key)
+          :else
+          #(get % group-key))
+    (if-let [group-fn (:onyx/group-by-fn task-map)]
+      (kw->fn group-fn))))
+
 (defn lifecycles->event-map
   [{:keys [onyx.core/lifecycles onyx.core/task] :as event}]
   (update event
@@ -170,10 +185,6 @@
          results)]
     {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
 
-(defn resolve-aggregation-calls [s]
-  (let [kw (if (sequential? s) (first s) s)]
-    (var-get (kw->fn kw))))
-
 (defn roll-up-window [window resolved-calls state extents segment]
   (let [state-f (:aggregation/create-state-update resolved-calls)
         update-f (:aggregation/apply-state-update resolved-calls)]
@@ -305,6 +316,8 @@
                           :onyx.core/windows windows
                           :onyx.core/task-map catalog-entry
                           :onyx.core/fn (precompile-onyx-fn catalog-entry)
+                          :onyx.core/compiled
+                          {:grouping-fn (task-map->grouping-fn catalog-entry)}
                           :onyx.core/window-contents {}}
                          (lifecycles->event-map)
                          (flow-conditions->event-map)
