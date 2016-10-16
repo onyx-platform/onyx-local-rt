@@ -10,7 +10,6 @@ An alternative runtime for Onyx. Executes jobs in a pure, deterministic environm
 
 ## Differences from the Distributed Runtime
 
-- `:onyx/group-by-key` and `:onyx/group-by-fn` have no effect.
 - There are no job or task schedulers.
 
 ## Usage

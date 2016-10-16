@@ -5,7 +5,9 @@
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
             [onyx.flow-conditions.fc-routing :as r]
-            [onyx.peer.transform :as t]))
+            [onyx.windowing.window-extensions :as we]
+            [onyx.peer.transform :as t]
+            [onyx.windowing.aggregation]))
 
 ;;; Functions for example
 
@@ -25,6 +27,9 @@
 
 (defn mapcatv [f xs]
   (vec (mapcat f xs)))
+
+(defn unqualify-map [m]
+  (into {} (map (fn [[k v]] [(keyword (name k)) v]) m)))
 
 (defn lifecycles->event-map
   [{:keys [onyx.core/lifecycles onyx.core/task] :as event}]
@@ -57,6 +62,22 @@
                 (assoc :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task))
                 (assoc :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task))))))
 
+(defn windows->event-map
+  [{:keys [onyx.core/windows onyx.core/task] :as event}]
+  (let [compiled-windows
+        (map
+         (fn [window]
+           {:window window
+            :window-record ((we/windowing-builder window) (unqualify-map window))
+            :resolved-aggregations (resolve-aggregation-calls (:window/aggregation window))})
+         (filter
+          (fn [window]
+            (= (:window/task window) task))
+          windows))]
+    (-> event
+        (assoc :onyx.core/windows-state {})
+        (update-in [:onyx.core/compiled] assoc :windows compiled-windows))))
+
 (defn task-params->event-map [{:keys [onyx.core/task-map] :as event}]
   (let [params (map (fn [param] (get task-map param))
                     (:onyx/params task-map))]
@@ -72,7 +93,8 @@
    :lifecycle/read-batch :lifecycle/after-read-batch 
    :lifecycle/after-read-batch :lifecycle/apply-fn
    :lifecycle/apply-fn :lifecycle/route-flow-conditions
-   :lifecycle/route-flow-conditions :lifecycle/write-batch
+   :lifecycle/route-flow-conditions :lifecycle/assign-windows
+   :lifecycle/assign-windows :lifecycle/write-batch
    :lifecycle/write-batch :lifecycle/after-batch
    :lifecycle/after-batch :lifecycle/before-batch
    :lifecycle/after-task-stop :lifecycle/start-task?})
@@ -148,6 +170,79 @@
          results)]
     {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
 
+(defn resolve-aggregation-calls [s]
+  (let [kw (if (sequential? s) (first s) s)]
+    (var-get (kw->fn kw))))
+
+(defn roll-up-window [window resolved-calls state extents segment]
+  (let [state-f (:aggregation/create-state-update resolved-calls)
+        update-f (:aggregation/apply-state-update resolved-calls)]
+    (reduce
+     (fn [result extent]
+       (update-in result [extent]
+                  (fn [state*]
+                    (let [state** (or state* (:window/init window))
+                          v (state-f window state** segment)]
+                      (update-f window state** v)))))
+     state
+     extents)))
+
+(defn no-merge-next-window
+  [{:keys [window window-record resolved-aggregations]} window-state outgoing-segments]
+  (reduce
+   (fn [state {:keys [segment] :as msg}]
+     (let [coerced (we/uniform-units window-record segment)
+           extents (we/extents window-record state coerced)]
+       (roll-up-window window resolved-aggregations state extents coerced)))
+   window-state
+   outgoing-segments))
+
+(defn merge-next-window
+  [{:keys [window window-record resolved-aggregations]} window-state outgoing-segments]
+  (let [super-agg-f (:aggregation/super-aggregation-fn resolved-aggregations)]
+    (reduce
+     (fn [state {:keys [segment] :as msg}]
+       (let [segment-coerced (we/uniform-units window-record segment)
+             state* (we/speculate-update window-record state segment-coerced)
+             state** (we/merge-extents window-record state* super-agg-f segment-coerced)
+             extents (we/extents window-record (keys state**) segment-coerced)]
+         (roll-up-window window resolved-aggregations state** extents segment-coerced)))
+     window-state
+     outgoing-segments)))
+
+(defmulti next-window
+  (fn [compiled-window window-state outgoing-segments]
+    (get-in compiled-window [:window :window/type])))
+
+(defmethod next-window :fixed
+  [compiled-window window-state outgoing-segments]
+  (no-merge-next-window compiled-window window-state outgoing-segments))
+
+(defmethod next-window :sliding
+  [compiled-window window-state outgoing-segments]
+  (no-merge-next-window compiled-window window-state outgoing-segments))
+
+(defmethod next-window :global
+  [compiled-window window-state outgoing-segments]
+  (no-merge-next-window compiled-window window-state outgoing-segments))
+
+(defmethod next-window :session
+  [compiled-window window-state outgoing-segments]
+  (merge-next-window compiled-window window-state outgoing-segments))
+
+(defmethod apply-action :lifecycle/assign-windows
+  [env {:keys [event] :as task} action]
+  (let [{:keys [onyx.core/results]} event
+        new-state
+        (reduce
+         (fn [window-state {:keys [window-record window] :as w}]
+           (let [id (:window/id window)
+                 next-state (next-window w (get window-state id) results)]
+             (assoc window-state id next-state)))
+         (:onyx.core/window-state event)
+         (get-in event [:onyx.core/compiled :windows]))]
+    {:task (assoc-in task [:event :onyx.core/window-state] new-state)}))
+
 (defn route-to-children [results]
   (reduce
    (fn [result {:keys [segment routes]}]
@@ -199,7 +294,7 @@
     clojure.core/identity))
 
 (defn init-task-state
-  [graph lifecycles flow-conditions task-name catalog-entry]
+  [graph lifecycles flow-conditions windows task-name catalog-entry]
   (let [children (into #{} (dep/immediate-dependents graph task-name))
         base {:inbox []
               :start-task? false
@@ -207,29 +302,33 @@
               :event (-> {:onyx.core/task task-name
                           :onyx.core/lifecycles lifecycles
                           :onyx.core/flow-conditions flow-conditions
+                          :onyx.core/windows windows
                           :onyx.core/task-map catalog-entry
-                          :onyx.core/fn (precompile-onyx-fn catalog-entry)}
+                          :onyx.core/fn (precompile-onyx-fn catalog-entry)
+                          :onyx.core/window-contents {}}
                          (lifecycles->event-map)
                          (flow-conditions->event-map)
+                         (windows->event-map)
                          (task-params->event-map)
                          (egress-ids->event-map children))}]
     (if (seq children)
       {task-name base}
       {task-name (assoc base :outputs [])})))
 
-(defn init-task-states [workflow catalog lifecycles flow-conditions graph]
+(defn init-task-states
+  [workflow catalog lifecycles flow-conditions windows graph]
   (let [tasks (reduce into #{} workflow)]
     (apply merge
            (map
             (fn [task-name]
               (let [catalog-entry (find-task catalog task-name)]
                 (init-task-state graph lifecycles flow-conditions
-                                 task-name catalog-entry)))
+                                 windows task-name catalog-entry)))
             tasks))))
 
-(defn init [{:keys [workflow catalog lifecycles flow-conditions] :as job}]
+(defn init [{:keys [workflow catalog lifecycles flow-conditions windows] :as job}]
   (let [graph (workflow->sierra-graph workflow)]
-    {:tasks (init-task-states workflow catalog lifecycles flow-conditions graph)
+    {:tasks (init-task-states workflow catalog lifecycles flow-conditions windows graph)
      :sorted-tasks (dep/topo-sort graph)
      :pending-writes {}
      :next-action :lifecycle/start-task?}))
@@ -339,12 +438,21 @@
    :flow-conditions
    [{:flow/from :inc
      :flow/to [:out]
-     :flow/predicate ::segment-even?}]})
+     :flow/predicate ::segment-even?}]
+   :windows
+   [{:window/id :max-n
+     :window/task :inc
+     :window/type :session
+     :window/timeout-gap [1 :day]
+     :window/session-key :user-id
+     :window/aggregation [:onyx.windowing.aggregation/max :n]
+     :window/window-key :event-time
+     :window/init 0}]})
 
 (clojure.pprint/pprint
  (-> (init job)
-     (new-segment :in {:n 41})
-     (new-segment :in {:n 84})
+     (new-segment :in {:n 401 :event-time 100 :user-id 1})
+     (new-segment :in {:n 500 :event-time 99 :user-id 1})
      (drain)
      (stop)
      (env-summary)))
