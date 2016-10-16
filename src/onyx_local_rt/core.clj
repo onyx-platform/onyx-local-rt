@@ -198,48 +198,60 @@
      state
      extents)))
 
+(defn window-transition-fns [event state segment]
+  (if-let [f (get-in event [:onyx.core/compiled :grouping-fn])]
+    (let [group (f segment)]
+      {:state* (get state group)
+       :ret-f (fn [v] (assoc state group v))})
+    {:state* state
+     :ret-f (fn [v] v)}))
+
 (defn no-merge-next-window
-  [{:keys [window window-record resolved-aggregations]} window-state outgoing-segments]
+  [{:keys [window window-record resolved-aggregations]} window-state event outgoing-segments]
   (reduce
    (fn [state {:keys [segment] :as msg}]
-     (let [coerced (we/uniform-units window-record segment)
-           extents (we/extents window-record state coerced)]
-       (roll-up-window window resolved-aggregations state extents coerced)))
+     (let [{:keys [state* ret-f]} (window-transition-fns event state segment)
+           coerced (we/uniform-units window-record segment)
+           extents (we/extents window-record state* coerced)
+           result (roll-up-window window resolved-aggregations state* extents coerced)]
+       (ret-f result)))
    window-state
    outgoing-segments))
 
 (defn merge-next-window
-  [{:keys [window window-record resolved-aggregations]} window-state outgoing-segments]
+  [{:keys [window window-record resolved-aggregations]} window-state event outgoing-segments]
   (let [super-agg-f (:aggregation/super-aggregation-fn resolved-aggregations)]
     (reduce
      (fn [state {:keys [segment] :as msg}]
-       (let [segment-coerced (we/uniform-units window-record segment)
-             state* (we/speculate-update window-record state segment-coerced)
-             state** (we/merge-extents window-record state* super-agg-f segment-coerced)
-             extents (we/extents window-record (keys state**) segment-coerced)]
-         (roll-up-window window resolved-aggregations state** extents segment-coerced)))
+       (let [{:keys [state* ret-f]} (window-transition-fns event state segment)
+             segment-coerced (we/uniform-units window-record segment)
+             state* (we/speculate-update window-record state* segment-coerced)
+             state* (we/merge-extents window-record state* super-agg-f segment-coerced)
+             extents (we/extents window-record (keys state*) segment-coerced)
+             result (roll-up-window window resolved-aggregations state* extents segment-coerced)]
+         (ret-f result)))
      window-state
      outgoing-segments)))
 
 (defmulti next-window
-  (fn [compiled-window window-state outgoing-segments]
+  (fn [compiled-window window-state event outgoing-segments]
     (get-in compiled-window [:window :window/type])))
 
 (defmethod next-window :fixed
-  [compiled-window window-state outgoing-segments]
-  (no-merge-next-window compiled-window window-state outgoing-segments))
+  [compiled-window window-state event outgoing-segments]
+  (no-merge-next-window compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :sliding
-  [compiled-window window-state outgoing-segments]
-  (no-merge-next-window compiled-window window-state outgoing-segments))
+  [compiled-window window-state event outgoing-segments]
+  (no-merge-next-window compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :global
-  [compiled-window window-state outgoing-segments]
-  (no-merge-next-window compiled-window window-state outgoing-segments))
+  [compiled-window window-state event outgoing-segments]
+  (no-merge-next-window compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :session
-  [compiled-window window-state outgoing-segments]
-  (merge-next-window compiled-window window-state outgoing-segments))
+  [compiled-window window-state event outgoing-segments]
+  (merge-next-window compiled-window window-state event outgoing-segments))
 
 (defmethod apply-action :lifecycle/assign-windows
   [env {:keys [event] :as task} action]
@@ -248,7 +260,7 @@
         (reduce
          (fn [window-state {:keys [window-record window] :as w}]
            (let [id (:window/id window)
-                 next-state (next-window w (get window-state id) results)]
+                 next-state (next-window w (get window-state id) event results)]
              (assoc window-state id next-state)))
          (:onyx.core/window-state event)
          (get-in event [:onyx.core/compiled :windows]))]
@@ -443,29 +455,27 @@
              {:onyx/name :inc
               :onyx/type :function
               :onyx/fn ::my-inc
+              :onyx/group-by-key :user-id
               :onyx/batch-size 1}
              {:onyx/name :out
               :onyx/type :output
               :onyx/batch-size 1}]
    :lifecycles []
-   :flow-conditions
-   [{:flow/from :inc
-     :flow/to [:out]
-     :flow/predicate ::segment-even?}]
    :windows
    [{:window/id :max-n
      :window/task :inc
      :window/type :session
-     :window/timeout-gap [1 :day]
      :window/session-key :user-id
-     :window/aggregation [:onyx.windowing.aggregation/max :n]
      :window/window-key :event-time
+     :window/timeout-gap [1 :day]
+     :window/aggregation [:onyx.windowing.aggregation/max :n]
      :window/init 0}]})
 
 (clojure.pprint/pprint
  (-> (init job)
-     (new-segment :in {:n 401 :event-time 100 :user-id 1})
-     (new-segment :in {:n 500 :event-time 99 :user-id 1})
+     (new-segment :in {:n 399 :user-id 1 :event-time 100})
+     (new-segment :in {:n 499 :user-id 2 :event-time 100})
+     (new-segment :in {:n 504 :user-id 2 :event-time 100})
      (drain)
      (stop)
      (env-summary)))
