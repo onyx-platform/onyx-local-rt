@@ -7,6 +7,7 @@ An alternative runtime for Onyx. Executes jobs in a pure, deterministic environm
 - Offer a subset of the Distributed Runtime functionality in an easier-to-configure environment.
 - Target ClojureScript as an underlying execution environment.
 - Guarantee ordering.
+- Share as much code as possible with the Distributed Runtime.
 
 ## Differences from the Distributed Runtime
 
