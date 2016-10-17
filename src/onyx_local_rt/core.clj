@@ -302,7 +302,7 @@
 
 (defn trigger-extent
   [{:keys [window state state-event event-results] :as window-state}]
-  (let [{:keys [trigger-state extent]} state-event 
+  (let [{:keys [trigger-state extent]} state-event
         {:keys [sync-fn trigger create-state-update apply-state-update]} trigger-state
         extent-state (get state extent)
         state-event (assoc state-event :extent-state extent-state)
@@ -333,9 +333,9 @@
                              (assoc :lower-bound lower-bound)
                              (assoc :upper-bound upper-bound))]
          (if (trigger-fire? trigger new-trigger-state state-event)
-           (trigger-extent (assoc t 
-                                  :state-event 
-                                  (assoc state-event :extent extent)))   
+           (trigger-extent (assoc t
+                                  :state-event
+                                  (assoc state-event :extent extent)))
            t)))
      (assoc-in window-state [:trigger-states trigger-index :trigger-state :state] new-trigger-state)
      fire-extents)))
