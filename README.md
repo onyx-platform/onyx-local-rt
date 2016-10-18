@@ -1,20 +1,38 @@
 # onyx-local-rt
 
-An alternative runtime for Onyx. Executes jobs in a pure, deterministic environment. This is an incubating repository. This
-code will be moved into Onyx core at a later day.
+onyx-local-rt is an alternative runtime for Onyx that executes jobs in a pure, deterministic environment. This runtime is local-only, and does not run in a distributed mode. This is an incubating repository, meaning this
+code will be moved into Onyx core at a later date.
 
 ## Goals
 
 - Offer a subset of the Distributed Runtime functionality in an easier-to-configure environment.
 - Target ClojureScript as an underlying execution environment.
-- Guarantee ordering.
+- Guarantee ordering of message flow throughout jobs.
 - Share as much code as possible with the Distributed Runtime.
 
 ## Differences from the Distributed Runtime
 
 - There are no job or task schedulers.
+- There is no backpressure.
+- There is no multi-node execution or network calls.
+- There are no threads, parallelism, or atoms.
+- This runtime is not designed to be ultra-high performance.
 
 ## Usage
+
+In your `project.clj`:
+
+```
+[org.onyxplatform/onyx-local-rt "0.9.11.0"]
+```
+
+First, Require the only file, `api.cljc`, and define any functions that will be used.
+Next, call `init` with your job. You can then add new segments to an input task (`new-segment`),
+move the runtime forward (`tick`), move the runtime forward until all in-flight segments have
+reached their outputs (`drain`), or simulate the job shutting down (`stop`). All API functions
+take and return the runtime.
+
+As an example for Clojure(Script):
 
 ```clojure
 (:require [onyx-local-rt.api :as api])
