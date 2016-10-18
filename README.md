@@ -1,6 +1,7 @@
 # onyx-local-rt
 
-An alternative runtime for Onyx. Executes jobs in a pure, deterministic environment.
+An alternative runtime for Onyx. Executes jobs in a pure, deterministic environment. This is an incubating repository. This
+code will be moved into Onyx core at a later day.
 
 ## Goals
 
