@@ -1,30 +1,14 @@
-(ns onyx-local-rt.core
+(ns onyx-local-rt.api
   (:require [com.stuartsierra.dependency :as dep]
             [onyx.static.util :refer [kw->fn exception?]]
-            [onyx.static.planning :refer [find-task]]
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
             [onyx.flow-conditions.fc-routing :as r]
             [onyx.windowing.window-extensions :as we]
-            [onyx.peer.transform :as t]
             [onyx.windowing.aggregation]
             [onyx.refinements]
             [onyx.triggers]
             [onyx.types :refer [map->TriggerState]]))
-
-;;; Functions for example
-
-(defn my-inc [segment]
-  (update-in segment [:n] inc))
-
-(defn segment-even? [event old new all-new]
-  (even? (:n new)))
-
-(defn write-to-stdout! [event window trigger state-event extent-state]
-  (prn (:group state-event))
-  (prn "State is: " extent-state))
-
-;;;
 
 (defn takev [k xs]
   (vec (take k xs)))
@@ -35,6 +19,9 @@
 (defn mapcatv [f xs]
   (vec (mapcat f xs)))
 
+(defn curry-params [f params]
+  (reduce partial f params))
+
 (defn unqualify-map [m]
   (into {} (map (fn [[k v]] [(keyword (name k)) v]) m)))
 
@@ -42,12 +29,28 @@
   (or (:onyx/group-by-key task-map)
       (:onyx/group-by-fn task-map)))
 
+(defn only [coll]
+  (when (next coll)
+    (throw (ex-info "More than one element in collection, expected count of 1" {:coll coll})))
+  (if-let [result (first coll)]
+    result
+    (throw (ex-info "Zero elements in collection, expected exactly one" {:coll coll}))))
+
+(defn find-task [catalog task-name]
+  (let [matches (filter #(= task-name (:onyx/name %)) catalog)]
+    (only matches)))
+
 (defn make-uuid []
-  (java.util.UUID/randomUUID))
+  #?(:clj (java.util.UUID/randomUUID))
+  #?(:cljs (random-uuid)))
+
+(defn resolve-var [v]
+  #?(:clj (var-get v))
+  #?(:cljs v))
 
 (defn resolve-aggregation-calls [s]
   (let [kw (if (sequential? s) (first s) s)]
-    (var-get (kw->fn kw))))
+    (resolve-var (kw->fn kw))))
 
 (defn task-map->grouping-fn [task-map]
   (if-let [group-key (:onyx/group-by-key task-map)]
@@ -104,8 +107,8 @@
 
 (defn resolve-trigger
   [{:keys [trigger/sync trigger/refinement trigger/on trigger/window-id] :as trigger}]
-  (let [refinement-calls (var-get (kw->fn refinement))
-        trigger-calls (var-get (kw->fn on))]
+  (let [refinement-calls (resolve-var (kw->fn refinement))
+        trigger-calls (resolve-var (kw->fn on))]
     (let [trigger (assoc trigger :trigger/id (make-uuid))
           f-init-state (:trigger/init-state trigger-calls)]
       (-> trigger
@@ -203,15 +206,22 @@
         event (:event task)]
     {:task (assoc task :event (merge event (f event)))}))
 
+(defn collect-next-segments [f input]
+  (let [segments (try (f input)
+                      (catch #?(:clj Throwable) #?(:cljs js/Error) e
+                        (ex-info "Segment threw exception"
+                                 {:exception e :segment input})))]
+    (if (sequential? segments) segments (vector segments))))
+
 (defmethod apply-action :lifecycle/apply-fn
   [env {:keys [event] :as task} action]
   (let [{:keys [onyx.core/batch onyx.core/params]} event]
     {:task
      (if (seq batch)
-       (let [f (t/curry-params (:onyx.core/fn event) params)
+       (let [f (curry-params (:onyx.core/fn event) params)
              results (mapv
                       (fn [old]
-                        (let [all-new (t/collect-next-segments f old)]
+                        (let [all-new (collect-next-segments f old)]
                           {:old old :all-new all-new}))
                       batch)]
          (assoc-in task [:event :onyx.core/results] results))
@@ -590,7 +600,11 @@
    (loop [env env
           i 0]
      (cond (> i max-ticks)
-           (throw (ex-info (format "Ticked %s times and never drained, runtime will not proceed with further execution." max-ticks) {}))
+           (throw
+            (ex-info
+             (str
+              "Ticked " max-ticks " times and never drained, runtime will not proceed with further execution.")
+             {}))
 
            (drained? env) env
 
@@ -632,47 +646,3 @@
 
 (defn stop [env]
   (transition-env env {:event :stop}))
-
-(def job
-  {:workflow [[:in :inc] [:inc :out]]
-   :catalog [{:onyx/name :in
-              :onyx/type :input
-              :onyx/batch-size 1}
-             {:onyx/name :inc
-              :onyx/type :function
-              :onyx/fn ::my-inc
-              :onyx/group-by-key :user-id
-              :onyx/batch-size 1}
-             {:onyx/name :out
-              :onyx/type :output
-              :onyx/batch-size 1}]
-   :lifecycles []
-   :windows
-   [{:window/id :max-n
-     :window/task :inc
-     :window/type :global
-;;     :window/range [1 :minute]
-;;     :window/window-key :event-time
-     :window/aggregation [:onyx.windowing.aggregation/sum :n]
-     :window/init 0}]
-   :triggers
-   [{:trigger/window-id :max-n
-     :trigger/refinement :onyx.refinements/accumulating
-     :trigger/on :onyx.triggers/segment
-     :trigger/threshold [1 :element]
-     :trigger/sync ::write-to-stdout!}]})
-
-(-> (init job)
-    (new-segment :in {:n 399 :user-id :mike :event-time 100})
-    (new-segment :in {:n 499 :user-id :lucas :event-time 100000})
-    (new-segment :in {:n 504 :user-id :lucas :event-time 50000000})
-    (tick)
-    (tick)
-    (tick)
-    (drain)
-    (get-in [:tasks :inc :event :onyx.core/window-states :max-n])
-;;    (env-summary)
-    (clojure.pprint/pprint)
-    )
-
-
