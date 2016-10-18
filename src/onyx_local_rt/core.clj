@@ -21,6 +21,7 @@
   (even? (:n new)))
 
 (defn write-to-stdout! [event window trigger state-event extent-state]
+  (prn (:group state-event))
   (prn "State is: " extent-state))
 
 ;;;
@@ -373,7 +374,7 @@
           (reduce
            (fn [state {:keys [segment]}]
              (let [group (grouping-f segment)]
-               (if (get-in state [:trigger-states 0 group])
+               (if (get-in state [window-id :trigger-states 0 group])
                  state
                  (reduce-kv (fn [state* k f] (f window-id state* segment)) state k->f))))
            window-state
@@ -408,18 +409,27 @@
          (reduce-kv
           (fn [state* trigger-index groups]
             (let [{:keys [trigger-state]} (get groups group)]
-              (if (= (get-in state* [:window-state group :state-event :event-type])
+              (if (= (get-in state* [(:window/id window) :window-state
+                                     group :state-event :event-type])
                      :new-segment)
                 (let [state-event
-                      {:log-type :trigger
-                       :trigger-index trigger-index
-                       :trigger-state trigger-state}
+                      (merge
+                       (get-in state* [(:window/id window) :window-state
+                                       group :state-event])
+                       {:log-type :trigger
+                        :trigger-index trigger-index
+                        :trigger-state trigger-state
+                        :grouped? true
+                        :group group})
                       {:keys [window/id]} window
-                      window-state (get-in result [:window-state id])]
-                  (trigger window window-record window-state state-event results))
+                      window-state (get-in state* [id :window-state group])
+                      rets (trigger window window-record window-state state-event results)]
+                  (-> state*
+                      (assoc-in [id :trigger-states trigger-index group :trigger-state] (:trigger-state rets))
+                      (assoc-in [id :window-state group] (:window-state rets))))
                 state*)))
           state
-          (:trigger-states state))))
+          (get-in old-state [(:window/id window) :trigger-states]))))
      old-state
      results)))
 
@@ -631,7 +641,7 @@
              {:onyx/name :inc
               :onyx/type :function
               :onyx/fn ::my-inc
-              ;;; :onyx/group-by-key :user-id
+              :onyx/group-by-key :user-id
               :onyx/batch-size 1}
              {:onyx/name :out
               :onyx/type :output
@@ -640,16 +650,16 @@
    :windows
    [{:window/id :max-n
      :window/task :inc
-     :window/type :fixed
-     :window/range [1 :minute]
-     :window/window-key :event-time
+     :window/type :global
+;;     :window/range [1 :minute]
+;;     :window/window-key :event-time
      :window/aggregation [:onyx.windowing.aggregation/sum :n]
      :window/init 0}]
    :triggers
    [{:trigger/window-id :max-n
      :trigger/refinement :onyx.refinements/accumulating
      :trigger/on :onyx.triggers/segment
-     :trigger/threshold [4 :element]
+     :trigger/threshold [1 :element]
      :trigger/sync ::write-to-stdout!}]})
 
 (-> (init job)
@@ -660,7 +670,7 @@
     (tick)
     (tick)
     (drain)
-    (get-in [:tasks :inc :event :onyx.core/window-states :max-n :window-state :state])
+    (get-in [:tasks :inc :event :onyx.core/window-states :max-n])
 ;;    (env-summary)
     (clojure.pprint/pprint)
     )
