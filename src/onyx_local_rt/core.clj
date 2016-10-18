@@ -135,12 +135,12 @@
        (let [t (resolve-trigger trigger)
              f
              (if grouped?
-               (fn [window-state segment]
+               (fn [id window-state segment]
                  (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])
                        group (group-f segment)]
-                   (assoc-in window-state [:trigger-states k group :trigger-state] t)))
-               (fn [window-state]
-                 (assoc-in window-state [:trigger-states k :trigger-state] t)))]
+                   (assoc-in window-state [id :trigger-states k group :trigger-state] t)))
+               (fn [id window-state]
+                 (assoc-in window-state [id :trigger-states k :trigger-state] t)))]
          (assoc-in event [:onyx.core/compiled :build-trigger-fn k] f)))
      event
      (map vector live-triggers (range)))))
@@ -321,14 +321,10 @@
          (get-in event [:onyx.core/compiled :windows]))]
     {:task (assoc-in task [:event :onyx.core/window-states] new-state)}))
 
-(defn trigger-extent
-  [{:keys [window event-results group state-event] :as window-state}]
-  (let [w-state (:window-state window-state)
-        state (get-in w-state [group :state])
-        state-event (get state-event group)
-        {:keys [trigger-state extent]} state-event
+(defn trigger-extent [window window-state state-event event-results]
+  (let [{:keys [trigger-state extent]} state-event
         {:keys [sync-fn trigger create-state-update apply-state-update]} trigger-state
-        extent-state (get state extent)
+        extent-state (get (:state window-state) extent)
         state-event (assoc state-event :extent-state extent-state)
         entry (create-state-update trigger extent-state state-event)
         new-extent-state (apply-state-update trigger extent-state entry)
@@ -336,47 +332,42 @@
                         (assoc :next-state new-extent-state)
                         (assoc :trigger-update entry))]
     (sync-fn (:task-event state-event) window trigger state-event extent-state)
-    (-> window-state
-        (assoc-in [group :state] (assoc state extent new-extent-state))
-        (assoc-in [group :event-results]
-                  (if (= extent-state new-extent-state)
-                    event-results
-                    (conj event-results state-event))))))
+    {:window-state (assoc-in window-state [:state extent] new-extent-state)
+     :event-results (if (= extent-state new-extent-state)
+                      event-results
+                      (conj event-results state-event))}))
 
-(defn trigger
-  [{:keys [window window-record window-state group] :as state}]
-  (let [state-event (:state-event (get window-state group))
-        w-state (:state (get window-state group))
-        {:keys [trigger-index trigger-state]} state-event
+(defn trigger [window window-record window-state state-event event-results]
+  (let [{:keys [trigger-index trigger-state]} state-event
         {:keys [trigger next-trigger-state trigger-fire? fire-all-extents?]} trigger-state
         old-trigger-state (:state trigger-state)
         state-event (assoc state-event :window window)
         new-trigger-state (next-trigger-state trigger old-trigger-state state-event)
         fire-all? (or fire-all-extents? (not= (:event-type state-event) :new-segment))
-        fire-extents (if fire-all? (keys w-state) (:extents state-event))]
+        fire-extents (if fire-all? (keys window-state) (:extents state-event))]
     (reduce
      (fn [t extent]
        (let [[lower-bound upper-bound] (we/bounds window-record extent)
              state-event (-> state-event
                              (assoc :lower-bound lower-bound)
-                             (assoc :upper-bound upper-bound))]
+                             (assoc :upper-bound upper-bound)
+                             (assoc :extent extent))]
          (if (trigger-fire? trigger new-trigger-state state-event)
-           (trigger-extent (assoc-in t
-                                     [:state-event group]
-                                     (assoc state-event :extent extent)))
+           (let [rets (trigger-extent window window-state state-event event-results)]
+             (assoc t :window-state (:window-state rets)))
            t)))
-     (assoc-in state [:trigger-states trigger-index group :trigger-state]
-               (assoc trigger-state :state new-trigger-state))
+     {:trigger-state (assoc trigger-state :state new-trigger-state)
+      :window-state window-state}
      fire-extents)))
 
-(defn build-trigger-state [event window-state results]
+(defn build-trigger-state [event window-id window-state results]
   (let [grouping-f (get-in event [:onyx.core/compiled :grouping-fn])
         k->f (get-in event [:onyx.core/compiled :build-trigger-fn])]
-    (cond (and (not grouping-f) (:trigger-states window-state))
+    (cond (and (not grouping-f) (get-in window-state [window-id :trigger-states]))
           window-state
 
           (not grouping-f)
-          (reduce-kv (fn [state k f] (f state)) window-state k->f)
+          (reduce-kv (fn [state k f] (f window-id state)) window-state k->f)
 
           :else
           (reduce
@@ -384,31 +375,30 @@
              (let [group (grouping-f segment)]
                (if (get-in state [:trigger-states 0 group])
                  state
-                 (reduce-kv (fn [state* k f] (f state* segment)) state k->f))))
+                 (reduce-kv (fn [state* k f] (f window-id state* segment)) state k->f))))
            window-state
            results))))
 
-
-(defn update-trigger [old-state window window-record results]
+(defn update-trigger-ungrouped [event old-state window window-record results]
   (reduce-kv
    (fn [result trigger-index {:keys [trigger-state]}]
-     (if (= (get-in result [:window-state :state-event :event-type])
+     (if (= (get-in result [(:window/id window) :window-state :state-event :event-type])
             :new-segment)
        (let [state-event
-             {:log-type :trigger
-              :trigger-index trigger-index
-              :trigger-state trigger-state}
-             old-state*
-             (-> result
-                 (assoc :event-results results)
-                 (assoc :window window)
-                 (assoc :window-record window-record)
-                 (update-in [:window-state :state-event] merge state-event))]
-         (trigger old-state*))
+             (merge
+              (get-in result [(:window/id window) :window-state :state-event])
+              {:log-type :trigger
+               :trigger-index trigger-index
+               :trigger-state trigger-state})
+             {:keys [window/id]} window
+             window-state (get-in result [(:window/id window) :window-state])
+             rets (trigger window window-record window-state state-event results)]
+         (-> result
+             (assoc-in [id :trigger-states trigger-index :trigger-state] (:trigger-state rets))
+             (assoc-in [id :window-state] (:window-state rets))))
        result))
    old-state
-   (:trigger-states old-state)))
-
+   (get-in old-state [(:window/id window) :trigger-states])))
 
 (defn update-trigger-grouped [event old-state window window-record results]
   (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])]
@@ -424,32 +414,27 @@
                       {:log-type :trigger
                        :trigger-index trigger-index
                        :trigger-state trigger-state}
-                      old-state*
-                      (-> state*
-                          (assoc :event-results [result])
-                          (assoc :window window)
-                          (assoc :group group)
-                          (assoc :window-record window-record)
-                          (update-in [:window-state group :state-event] merge state-event))]
-                  (trigger old-state*))
+                      {:keys [window/id]} window
+                      window-state (get-in result [:window-state id])]
+                  (trigger window window-record window-state state-event results))
                 state*)))
           state
           (:trigger-states state))))
      old-state
      results)))
 
-
 (defmethod apply-action :lifecycle/fire-triggers
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results]} event]
+  (let [{:keys [onyx.core/results onyx.core/compiled]} event
+        grouped? (:grouping-fn compiled)]
     (if (seq results)
       (let [new-state
             (reduce
              (fn [window-states {:keys [window window-record]}]
                (let [window-id (:window/id window)
-                     old-state (build-trigger-state event (get window-states window-id) results)
-                     new-state (update-trigger-grouped event old-state window window-record results)]
-                 (assoc window-states window-id new-state)))
+                     old-state (build-trigger-state event window-id window-states results)
+                     update-f (if grouped? update-trigger-grouped update-trigger-ungrouped)]
+                 (update-f event old-state window window-record results)))
              (:onyx.core/window-states event)
              (get-in event [:onyx.core/compiled :windows]))]
         {:task (assoc-in task [:event :onyx.core/window-states] new-state)})
@@ -646,7 +631,7 @@
              {:onyx/name :inc
               :onyx/type :function
               :onyx/fn ::my-inc
-              :onyx/group-by-key :user-id
+              ;;; :onyx/group-by-key :user-id
               :onyx/batch-size 1}
              {:onyx/name :out
               :onyx/type :output
@@ -655,23 +640,29 @@
    :windows
    [{:window/id :max-n
      :window/task :inc
-     :window/type :global
+     :window/type :fixed
+     :window/range [1 :minute]
+     :window/window-key :event-time
      :window/aggregation [:onyx.windowing.aggregation/sum :n]
      :window/init 0}]
    :triggers
    [{:trigger/window-id :max-n
      :trigger/refinement :onyx.refinements/accumulating
      :trigger/on :onyx.triggers/segment
-     :trigger/threshold [1 :element]
+     :trigger/threshold [4 :element]
      :trigger/sync ::write-to-stdout!}]})
 
 (-> (init job)
     (new-segment :in {:n 399 :user-id :mike :event-time 100})
     (new-segment :in {:n 499 :user-id :lucas :event-time 100000})
-    (new-segment :in {:n 504 :user-id :lucas :event-time 100000})
+    (new-segment :in {:n 504 :user-id :lucas :event-time 50000000})
     (tick)
     (tick)
     (tick)
     (drain)
-    (get-in [:tasks :inc :event :onyx.core/window-states])
-    (clojure.pprint/pprint))
+    (get-in [:tasks :inc :event :onyx.core/window-states :max-n :window-state :state])
+;;    (env-summary)
+    (clojure.pprint/pprint)
+    )
+
+
