@@ -16,6 +16,9 @@ code will be moved into Onyx core at a later date.
 - There is no backpressure.
 - There is no multi-node execution or network calls.
 - There are no threads, parallelism, or atoms.
+- There are no peers or virtual peers.
+- There are no fault tolerance mechanisms.
+- Input and output plugins are ignored, use the API to put segments into/take segments out of the runtime.
 - This runtime is not designed to be ultra-high performance.
 
 ## Usage

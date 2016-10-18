@@ -5,4 +5,5 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.8.0"]
                  [org.onyxplatform/onyx "0.9.12-spec-alpha-20161018.194958-5"]
-                 [com.stuartsierra/dependency "0.2.0"]])
+                 [com.stuartsierra/dependency "0.2.0"]]
+  :plugins [[codox "0.8.8"]])
