@@ -13,12 +13,14 @@
 
 (defn tick
   "Advances the runtime one step in the lifecycle forward for all tasks."
-  [env]
-  (let [this-action (:next-action env)]
-    (-> env
-        (i/integrate-task-updates this-action)
-        (i/transfer-pending-writes)
-        (i/transition-action-sequence this-action))))
+  ([env n]
+   (nth (iterate tick env) n))
+  ([env]
+   (let [this-action (:next-action env)]
+     (-> env
+         (i/integrate-task-updates this-action)
+         (i/transfer-pending-writes)
+         (i/transition-action-sequence this-action)))))
 
 (defn drained?
   "Returns true if there are no in-flight segments."
