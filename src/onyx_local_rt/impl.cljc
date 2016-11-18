@@ -113,7 +113,8 @@
 (defn windows->event-map
   [{:keys [onyx.core/windows onyx.core/task] :as event}]
   (let [compiled-windows
-        (map compile-window
+        (map
+         compile-window
          (filter (fn [window] (= (:window/task window) task)) windows))]
     (update-in event [:onyx.core/compiled] assoc :windows compiled-windows)))
 
