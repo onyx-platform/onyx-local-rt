@@ -52,6 +52,22 @@
   (let [kw (if (sequential? s) (first s) s)]
     (resolve-var (kw->fn kw))))
 
+(defn resolve-window-init [window calls]
+  (if-not (:aggregation/init calls)
+    (let [init (:window/init window)]
+      (when-not init
+        (throw (ex-info "No :window/init supplied, this is required for this aggregation" {:window window})))
+      (constantly init))
+    (:aggregation/init calls)))
+
+(defn compile-window [window]
+  (let [calls (resolve-aggregation-calls (:window/aggregation window))
+        init-fn (resolve-window-init window calls)]
+    {:window window
+     :window-record ((we/windowing-builder window) (unqualify-map window))
+     :resolved-aggregations calls
+     :init-fn init-fn}))
+
 (defn task-map->grouping-fn [task-map]
   (if-let [group-key (:onyx/group-by-key task-map)]
     (cond (keyword? group-key)
@@ -97,11 +113,7 @@
 (defn windows->event-map
   [{:keys [onyx.core/windows onyx.core/task] :as event}]
   (let [compiled-windows
-        (map
-         (fn [window]
-           {:window window
-            :window-record ((we/windowing-builder window) (unqualify-map window))
-            :resolved-aggregations (resolve-aggregation-calls (:window/aggregation window))})
+        (map compile-window
          (filter (fn [window] (= (:window/task window) task)) windows))]
     (update-in event [:onyx.core/compiled] assoc :windows compiled-windows)))
 
@@ -249,14 +261,14 @@
          results)]
     {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
 
-(defn apply-extents [window resolved-calls state extents segment]
+(defn apply-extents [window init-fn resolved-calls state extents segment]
   (let [state-f (:aggregation/create-state-update resolved-calls)
         update-f (:aggregation/apply-state-update resolved-calls)]
     (reduce
      (fn [result extent]
        (update-in result [:state extent]
                   (fn [state*]
-                    (let [state** (or state* (:window/init window))
+                    (let [state** (or state* (init-fn window))
                           v (state-f window state** segment)]
                       (update-f window state** v)))))
      (assoc-in state [:state-event] {:event-type :new-segment
@@ -272,19 +284,19 @@
      :ret-f (fn [v] v)}))
 
 (defn no-merge-next-window
-  [{:keys [window window-record resolved-aggregations]} window-state event outgoing-segments]
+  [{:keys [window window-record init-fn resolved-aggregations]} window-state event outgoing-segments]
   (reduce
    (fn [state {:keys [segment] :as msg}]
      (let [{:keys [state* ret-f]} (state-transition-fns event state segment)
            coerced (we/uniform-units window-record segment)
            extents (we/extents window-record state* coerced)
-           result (apply-extents window resolved-aggregations state* extents coerced)]
+           result (apply-extents window init-fn resolved-aggregations state* extents coerced)]
        (ret-f result)))
    window-state
    outgoing-segments))
 
 (defn merge-next-window
-  [{:keys [window window-record resolved-aggregations]} window-state event outgoing-segments]
+  [{:keys [window window-record init-fn resolved-aggregations]} window-state event outgoing-segments]
   (let [super-agg-f (:aggregation/super-aggregation-fn resolved-aggregations)]
     (reduce
      (fn [state {:keys [segment] :as msg}]
@@ -293,7 +305,7 @@
              state* (we/speculate-update window-record state* segment-coerced)
              state* (we/merge-extents window-record state* super-agg-f segment-coerced)
              extents (we/extents window-record (keys state*) segment-coerced)
-             result (apply-extents window resolved-aggregations state* extents segment-coerced)]
+             result (apply-extents window init-fn resolved-aggregations state* extents segment-coerced)]
          (ret-f result)))
      window-state
      outgoing-segments)))
