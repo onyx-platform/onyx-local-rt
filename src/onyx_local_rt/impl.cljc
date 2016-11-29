@@ -8,7 +8,8 @@
             [onyx.windowing.aggregation]
             [onyx.refinements]
             [onyx.triggers]
-            [onyx.types :refer [map->TriggerState]]))
+            [onyx.types :refer [map->TriggerState]]
+            [onyx.spec]))
 
 (defn takev [k xs]
   (vec (take k xs)))
@@ -93,6 +94,8 @@
                        (lc/compile-before-batch-task-functions lifecycles task))
                 (assoc :compiled-after-read-batch-fn
                        (lc/compile-after-read-batch-task-functions lifecycles task))
+                (assoc :compiled-after-apply-fn
+                       (lc/compile-after-apply-fn-task-functions lifecycles task))
                 (assoc :compiled-after-batch-fn
                        (lc/compile-after-batch-task-functions lifecycles task))
                 (assoc :compiled-after-task-fn
@@ -176,7 +179,8 @@
    :lifecycle/before-batch :lifecycle/read-batch
    :lifecycle/read-batch :lifecycle/after-read-batch 
    :lifecycle/after-read-batch :lifecycle/apply-fn
-   :lifecycle/apply-fn :lifecycle/route-flow-conditions
+   :lifecycle/apply-fn :lifecycle/after-apply-fn
+   :lifecycle/after-apply-fn :lifecycle/route-flow-conditions
    :lifecycle/route-flow-conditions :lifecycle/assign-windows
    :lifecycle/assign-windows :lifecycle/fire-triggers
    :lifecycle/fire-triggers :lifecycle/write-batch
@@ -212,6 +216,12 @@
      (-> task
          (assoc-in [:event :onyx.core/batch] (takev size inbox))
          (assoc :inbox (dropv size inbox)))}))
+
+(defmethod apply-action :lifecycle/after-apply-fn
+  [env task action]
+  (let [f (get-in task [:event :onyx.core/compiled :compiled-after-apply-fn])
+        event (:event task)]
+    {:task (assoc task :event (merge event (f event)))}))
 
 (defmethod apply-action :lifecycle/after-read-batch
   [env task action]

@@ -1,6 +1,7 @@
 (ns onyx-local-rt.api
   (:require [com.stuartsierra.dependency :as dep]
-            [onyx-local-rt.impl :as i]))
+            [onyx-local-rt.impl :as i]
+            [onyx.spec]))
 
 (defn init
   "Takes an Onyx job and returns a new runtime instance."
