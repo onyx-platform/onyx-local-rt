@@ -211,11 +211,15 @@
 
 (defmethod apply-action :lifecycle/read-batch
   [env {:keys [inbox event] :as task} action]
-  (let [size (:onyx/batch-size (:onyx.core/task-map event))]
+  (if-let [size (:onyx/batch-size (:onyx.core/task-map event))]
     {:task
      (-> task
          (assoc-in [:event :onyx.core/batch] (takev size inbox))
-         (assoc :inbox (dropv size inbox)))}))
+         (assoc :inbox (dropv size inbox)))}
+    {:task
+     (-> task
+         (assoc-in [:event :onyx.core/batch] inbox)
+         (assoc :inbox []))}))
 
 (defmethod apply-action :lifecycle/after-apply-fn
   [env task action]
