@@ -39,7 +39,7 @@
     (throw (ex-info "More than one element in collection, expected count of 1" {:coll coll})))
   (if-let [result (first coll)]
     result
-    (throw (ex-info "Zero elements in collection, expected exactly one" {:coll coll}))))
+    (throw (ex-info "Downstream tasks are not healthy. Stopping here." {}))))
 
 (defn find-task [catalog task-name]
   (let [matches (filter #(= task-name (:onyx/name %)) catalog)]
