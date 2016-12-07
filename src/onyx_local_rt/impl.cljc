@@ -166,8 +166,8 @@
      (map vector live-triggers (range)))))
 
 (defn task-params->event-map [{:keys [onyx.core/task-map] :as event}]
-  (let [params (map (fn [param] (get task-map param))
-                    (:onyx/params task-map))]
+  (let [params (mapv (fn [param] (get task-map param))
+                     (:onyx/params task-map))]
     (assoc event :onyx.core/params params)))
 
 (defn egress-ids->event-map [event children]
