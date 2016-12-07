@@ -414,55 +414,53 @@
            results))))
 
 (defn update-trigger-ungrouped [event old-state window window-record results]
-  (reduce-kv
-   (fn [result trigger-index {:keys [trigger-state]}]
-     (if (= (get-in result [(:window/id window) :window-state :state-event :event-type])
-            :new-segment)
-       (let [state-event
-             (merge
-              (get-in result [(:window/id window) :window-state :state-event])
-              {:log-type :trigger
-               :trigger-index trigger-index
-               :trigger-state trigger-state})
-             {:keys [window/id]} window
-             window-state (get-in result [(:window/id window) :window-state])
-             rets (trigger window window-record window-state state-event results)]
-         (-> result
-             (assoc-in [id :trigger-states trigger-index :trigger-state] (:trigger-state rets))
-             (assoc-in [id :window-state] (:window-state rets))))
-       result))
-   old-state
-   (get-in old-state [(:window/id window) :trigger-states])))
+  (let [wid (:window/id window)] 
+    (reduce-kv
+     (fn [result trigger-index {:keys [trigger-state]}]
+       (let [state-event (get-in result [wid :window-state :state-event])] 
+         (if (= (:event-type state-event) :new-segment)
+           (let [state-event*
+                 (merge state-event
+                        {:log-type :trigger
+                         :task-event event
+                         :trigger-index trigger-index
+                         :trigger-state trigger-state
+                         :grouped? false})
+                 window-state (get-in result [wid :window-state])
+                 rets (trigger window window-record window-state state-event* results)]
+             (-> result
+                 (assoc-in [wid :trigger-states trigger-index :trigger-state] (:trigger-state rets))
+                 (assoc-in [wid :window-state] (:window-state rets))))
+           result)))
+     old-state
+     (get-in old-state [wid :trigger-states]))))
 
 (defn update-trigger-grouped [event old-state window window-record results]
-  (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])]
+  (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])
+        wid (:window/id window)]
     (reduce
      (fn [state {:keys [segment] :as result}]
        (let [group (group-f segment)]
          (reduce-kv
           (fn [state* trigger-index groups]
-            (let [{:keys [trigger-state]} (get groups group)]
-              (if (= (get-in state* [(:window/id window) :window-state
-                                     group :state-event :event-type])
-                     :new-segment)
-                (let [state-event
-                      (merge
-                       (get-in state* [(:window/id window) :window-state
-                                       group :state-event])
-                       {:log-type :trigger
-                        :trigger-index trigger-index
-                        :trigger-state trigger-state
-                        :grouped? true
-                        :group group})
-                      {:keys [window/id]} window
-                      window-state (get-in state* [id :window-state group])
-                      rets (trigger window window-record window-state state-event results)]
+            (let [{:keys [trigger-state]} (get groups group)
+                  state-event (get-in state* [wid :window-state group :state-event])]
+              (if (= (:event-type state-event) :new-segment)
+                (let [state-event* (merge state-event 
+                                          {:log-type :trigger
+                                           :task-event event
+                                           :trigger-index trigger-index
+                                           :trigger-state trigger-state
+                                           :grouped? true
+                                           :group group})
+                      window-state (get-in state* [wid :window-state group])
+                      rets (trigger window window-record window-state state-event* results)]
                   (-> state*
-                      (assoc-in [id :trigger-states trigger-index group :trigger-state] (:trigger-state rets))
-                      (assoc-in [id :window-state group] (:window-state rets))))
+                      (assoc-in [wid :trigger-states trigger-index group :trigger-state] (:trigger-state rets))
+                      (assoc-in [wid :window-state group] (:window-state rets))))
                 state*)))
           state
-          (get-in old-state [(:window/id window) :trigger-states]))))
+          (get-in old-state [wid :trigger-states]))))
      old-state
      results)))
 
