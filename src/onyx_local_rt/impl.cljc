@@ -1,6 +1,6 @@
 (ns ^:no-doc onyx-local-rt.impl
   (:require [com.stuartsierra.dependency :as dep]
-            [onyx.static.util :refer [kw->fn exception?]]
+            [onyx.static.util :refer [kw->fn]]
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
             [onyx.flow-conditions.fc-routing :as r]
@@ -10,6 +10,10 @@
             [onyx.triggers]
             [onyx.types :refer [map->TriggerState]]
             [onyx.spec]))
+
+(defn exception? [e]
+  #?(:clj (instance? java.lang.Throwable e))
+  #?(:cljs (instance? js/Error e)))
 
 (defn takev [k xs]
   (vec (take k xs)))
