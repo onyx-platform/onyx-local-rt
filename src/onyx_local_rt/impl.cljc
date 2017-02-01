@@ -80,38 +80,59 @@
     (if-let [group-fn (:onyx/group-by-fn task-map)]
       (kw->fn group-fn))))
 
+(defn compile-before-task-start-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/before-task-start))
+
+(defn compile-before-batch-task-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/before-batch))
+
+(defn compile-after-read-batch-task-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/after-read-batch))
+
+(defn compile-after-apply-fn-task-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/after-apply-fn))
+
+(defn compile-after-batch-task-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/after-batch))
+
+(defn compile-after-task-functions [lifecycles task-name]
+  (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/after-task-stop))
+
+(defn compile-handle-exception-functions [lifecycles task-name]
+  (lc/compile-lifecycle-handle-exception-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name}))
+
 (defn lifecycles->event-map
   [{:keys [onyx.core/lifecycles onyx.core/task] :as event}]
-  (update event
-          :onyx.core/compiled
-          (fn [compiled]
-            (-> compiled
-                (assoc :compiled-start-task-fn
-                       (lc/compile-start-task-functions lifecycles task))
-                (assoc :compiled-before-task-start-fn
-                       (lc/compile-before-task-start-functions lifecycles task))
-                (assoc :compiled-before-batch-fn
-                       (lc/compile-before-batch-task-functions lifecycles task))
-                (assoc :compiled-after-read-batch-fn
-                       (lc/compile-after-read-batch-task-functions lifecycles task))
-                (assoc :compiled-after-apply-fn
-                       (lc/compile-after-apply-fn-task-functions lifecycles task))
-                (assoc :compiled-after-batch-fn
-                       (lc/compile-after-batch-task-functions lifecycles task))
-                (assoc :compiled-after-task-fn
-                       (lc/compile-after-task-functions lifecycles task))
-                (assoc :compiled-handle-exception-fn
-                       (lc/compile-handle-exception-functions lifecycles task))))))
+  (try (update event
+               :onyx.core/compiled
+               (fn [compiled]
+                 (-> compiled
+                     (assoc :compiled-start-task-fn
+                            (or (lc/compile-start-task-functions event) identity))
+                     (assoc :compiled-before-task-start-fn
+                            (or (compile-before-task-start-functions lifecycles task) identity))
+                     (assoc :compiled-before-batch-fn
+                            (or (compile-before-batch-task-functions lifecycles task) identity))
+                     (assoc :compiled-after-read-batch-fn
+                            (or (compile-after-read-batch-task-functions lifecycles task) identity))
+                     (assoc :compiled-after-apply-fn
+                            (or (compile-after-apply-fn-task-functions lifecycles task) identity))
+                     (assoc :compiled-after-batch-fn
+                            (or (compile-after-batch-task-functions lifecycles task) identity))
+                     (assoc :compiled-after-task-fn
+                            (or (compile-after-task-functions lifecycles task) identity))
+                     (assoc :compiled-handle-exception-fn
+                            (or (compile-handle-exception-functions lifecycles task) identity)))))
+       (catch #?(:clj Throwable) #?(:cljs js/Error) e
+         ;; Bail out if we can't compile the lifecycles. We can't do this
+         ;; for plugins that extensively use the JVM, for example.
+         event)))
 
 (defn flow-conditions->event-map
   [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event}]
-  (update event
-          :onyx.core/compiled
-          (fn [compiled]
-            (-> compiled
-                (assoc :flow-conditions flow-conditions)
-                (assoc :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task))
-                (assoc :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task))))))
+  (assoc event
+         :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
+         :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task)))
 
 (defn windows->event-map
   [{:keys [onyx.core/windows onyx.core/task] :as event}]
@@ -170,8 +191,8 @@
                      (:onyx/params task-map))]
     (assoc event :onyx.core/params params)))
 
-(defn egress-ids->event-map [event children]
-  (assoc-in event [:onyx.core/compiled :egress-ids] children))
+(defn egress-tasks->event-map [event children]
+  (assoc-in event [:egress-tasks] children))
 
 (def action-sequence
   {:lifecycle/start-task? :lifecycle/before-task-start
@@ -260,12 +281,12 @@
         reified-results
         (reduce
          (fn [all {:keys [old all-new] :as outgoing-message}]
-           (let [leaves (mapv (partial hash-map :message) all-new)
-                 root {:message old}]
+           (let [leaves all-new
+                 root old]
              (reduce
               (fn [all* new-msg]
-                (let [routes (r/route-data event compiled {:root root :leaves leaves} new-msg)
-                      transformed-msg (r/flow-conditions-transform new-msg routes event compiled)]
+                (let [routes (r/route-data event {:root root :leaves leaves} new-msg)
+                      transformed-msg (r/flow-conditions-transform new-msg routes event)]
                   (when (and (exception? new-msg)
                              (not (seq (:flow routes))))
                     (throw new-msg))
@@ -560,7 +581,7 @@
                          (windows->event-map)
                          (triggers->event-map)
                          (task-params->event-map)
-                         (egress-ids->event-map children))}]
+                         (egress-tasks->event-map children))}]
     (if (seq children)
       {task-name base}
       {task-name (assoc base :outputs [])})))
