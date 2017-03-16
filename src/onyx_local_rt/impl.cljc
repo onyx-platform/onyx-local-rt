@@ -290,7 +290,9 @@
                   (when (and (exception? new-msg)
                              (not (seq (:flow routes))))
                     (throw new-msg))
-                  (conj all* {:segment transformed-msg :routes (:flow routes)})))
+                  (conj all* {:old old
+                              :segment transformed-msg
+                              :routes (:flow routes)})))
               all
               all-new)))
          []
