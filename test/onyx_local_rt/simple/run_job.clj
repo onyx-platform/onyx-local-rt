@@ -31,6 +31,7 @@
                :trigger/refinement :onyx.refinements/accumulating
                :trigger/fire-all-extents? true
                :trigger/on :onyx.triggers/segment
+               :trigger/id :my-trigger
                :trigger/threshold [1 :elements]
                :trigger/sync ::update-atom!}]
    :lifecycles []})
