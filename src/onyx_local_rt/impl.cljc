@@ -573,6 +573,7 @@
               :start-task? false
               :children children
               :event (-> {:onyx.core/task task-name
+                          :onyx.core/task-id task-name
                           :onyx.core/workflow workflow
                           :onyx.core/catalog catalog
                           :onyx.core/lifecycles lifecycles
