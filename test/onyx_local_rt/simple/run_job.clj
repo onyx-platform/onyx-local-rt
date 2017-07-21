@@ -6,10 +6,10 @@
 (defn ^:export my-inc [segment]
   (update-in segment [:n] inc))
 
-(def test-state (atom nil))
+(def test-states (atom []))
 
 (defn update-atom! [event window trigger {:keys [lower-bound upper-bound event-type] :as state-event} extent-state]
-  (reset! test-state extent-state))
+  (swap! test-states conj extent-state))
 
 (def job
   {:workflow [[:in :inc] [:inc :out]]
@@ -37,16 +37,20 @@
    :lifecycles []})
 
 (deftest run-job-test
-  (reset! test-state [])
+  (reset! test-states [])
    (is (= {:next-action :lifecycle/start-task?, 
           :tasks {:inc {:inbox []}, 
                   :out {:inbox [], 
-                        :outputs [{:n 42} {:n 85}]}, 
+                        :outputs [{:n 42 :my-key :a} 
+                                  {:n 85 :my-key :a}
+                                  {:n 5 :my-key :c}]}, 
                   :in {:inbox []}}}
          (-> (api/init job)
-             (api/new-segment :in {:n 41})
-             (api/new-segment :in {:n 84})
+             (api/new-segment :in {:n 41 :my-key :a})
+             (api/new-segment :in {:n 84 :my-key :a})
+             (api/new-segment :in {:n 4 :my-key :c})
              (api/drain)
              (api/stop)
              (api/env-summary))))
-   (is (= @test-state [{:n 42} {:n 85}])))
+   (is (= [[{:n 42, :my-key :a}  {:n 85, :my-key :a}  {:n 5, :my-key :c}]]
+	  @test-states)))

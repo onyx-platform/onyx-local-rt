@@ -299,56 +299,65 @@
          results)]
     {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
 
-(defn merge-extents [window-record resolved-aggregations extents segment]
-  (let [super-agg-f (:aggregation/super-aggregation-fn resolved-aggregations)]
-    (we/merge-extents window-record extents super-agg-f segment)))
+(defn default-state-value 
+  [init-fn window state-value]
+  (or state-value (init-fn window)))
 
-(defn apply-extents [window-record window init-fn resolved-calls state extents segment]
-  (let [state-f (:aggregation/create-state-update resolved-calls)
-        update-f (:aggregation/apply-state-update resolved-calls)
-        state
-        (reduce
-         (fn [result extent]
-           (update-in result [:state extent]
-                      (fn [state*]
-                        (let [state** (or state* (init-fn window))
-                              v (state-f window state** segment)]
-                          (update-f window state** v)))))
-         (assoc-in state [:state-event] {:event-type :new-segment
-                                         :extents extents})
-         extents)]
-    (update state :state (fn [extents] (merge-extents window-record resolved-calls extents segment)))))
+(defn apply-extent-operations [window-record window init-fn resolved-calls state extent-operations segment]
+  (let [create-state-update (:aggregation/create-state-update resolved-calls)
+        apply-state-update (:aggregation/apply-state-update resolved-calls)
+        super-agg-fn (:aggregation/super-aggregation-fn resolved-calls)
+        updated-extents (distinct (map second (filter (fn [[op]] (= op :update)) extent-operations)))]
+    (reduce
+     (fn [{:keys [state] :as result} extent-operation]
+       (case (first extent-operation)
+         :update (let [extent (second extent-operation)
+                       extent-state (get state extent)
+                       extent-state (default-state-value init-fn window extent-state)
+                       transition-entry (create-state-update window extent-state segment)
+                       new-extent-state (apply-state-update window extent-state transition-entry)]
+                   (assoc-in result [:state extent] new-extent-state))
+
+         :merge-extents 
+         (let [[_ extent-1 extent-2 extent-merged] extent-operation
+               agg-merged (super-agg-fn window-record
+                                        (get state extent-1)
+                                        (get state extent-2))]
+           (-> result
+               (assoc-in [:state extent-merged] agg-merged)
+               (update :state dissoc extent-1)
+               (update :state dissoc extent-2)))
+
+         :alter-extents (let [[_ from-extent to-extent] extent-operation
+                              v (get state from-extent)]
+                          (-> result
+                              (assoc-in [:state to-extent] v)
+                              (update :state dissoc from-extent)))))
+
+     (assoc-in state [:state-event] {:extents updated-extents
+                                     :event-type :new-segment})
+     extent-operations)))
 
 (defn state-transition-fns [event state segment]
   (if-let [f (get-in event [:onyx.core/compiled :grouping-fn])]
     (let [group (f segment)]
       {:state* (get state group)
+       :group group
        :ret-f (fn [v] (assoc state group v))})
     {:state* state
      :ret-f (fn [v] v)}))
 
-(defn no-merge-next-window
+(defn reduce-segments
   [{:keys [window window-record init-fn resolved-aggregations]} window-state event outgoing-segments]
   (reduce
    (fn [state {:keys [segment] :as msg}]
      (let [{:keys [state* ret-f]} (state-transition-fns event state segment)
-           coerced (we/uniform-units window-record segment)
-           extents (we/extents window-record state* coerced)
-           result (apply-extents window-record window init-fn resolved-aggregations state* extents coerced)]
-       (ret-f result)))
-   window-state
-   outgoing-segments))
-
-(defn merge-next-window
-  [{:keys [window window-record init-fn resolved-aggregations]} window-state event outgoing-segments]
-  (reduce
-   (fn [state {:keys [segment] :as msg}]
-     (let [{:keys [state* ret-f]} (state-transition-fns event state segment)
-           extents (:state state*)
-           segment-coerced (we/uniform-units window-record segment)
-           extents* (we/speculate-update window-record extents segment-coerced)
-           extents** (we/extents window-record (keys extents*) segment-coerced)
-           result (apply-extents window-record window init-fn resolved-aggregations state* extents** segment-coerced)]
+           segment-time (we/segment-time window-record segment)
+           all-extents (keys (:state state*))
+           operations (we/extent-operations window-record all-extents segment segment-time)
+           result (apply-extent-operations window-record window init-fn 
+                                           resolved-aggregations state* 
+                                           operations segment)]
        (ret-f result)))
    window-state
    outgoing-segments))
@@ -359,19 +368,19 @@
 
 (defmethod next-window :fixed
   [compiled-window window-state event outgoing-segments]
-  (no-merge-next-window compiled-window window-state event outgoing-segments))
+  (reduce-segments compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :sliding
   [compiled-window window-state event outgoing-segments]
-  (no-merge-next-window compiled-window window-state event outgoing-segments))
+  (reduce-segments compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :global
   [compiled-window window-state event outgoing-segments]
-  (no-merge-next-window compiled-window window-state event outgoing-segments))
+  (reduce-segments compiled-window window-state event outgoing-segments))
 
 (defmethod next-window :session
   [compiled-window window-state event outgoing-segments]
-  (merge-next-window compiled-window window-state event outgoing-segments))
+  (reduce-segments compiled-window window-state event outgoing-segments))
 
 (defmethod apply-action :lifecycle/assign-windows
   [env {:keys [event] :as task} action]
@@ -398,19 +407,16 @@
                         (assoc :next-state new-extent-state)
                         (assoc :trigger-update entry))]
     (sync-fn (:task-event state-event) window trigger state-event extent-state)
-    {:window-state (assoc-in window-state [:state extent] new-extent-state)
-     :event-results (if (= extent-state new-extent-state)
-                      event-results
-                      (conj event-results state-event))}))
+    {:window-state (assoc-in window-state [:state extent] new-extent-state)}))
 
 (defn trigger [window window-record window-state state-event event-results]
   (let [{:keys [trigger-index trigger-state]} state-event
-        {:keys [trigger next-trigger-state trigger-fire? fire-all-extents?]} trigger-state
+        {:keys [trigger next-trigger-state trigger-fire?]} trigger-state
         old-trigger-state (:state trigger-state)
         state-event (assoc state-event :window window)
         new-trigger-state (next-trigger-state trigger old-trigger-state state-event)
-        fire-all? (or fire-all-extents? (not= (:event-type state-event) :new-segment))
-        fire-extents (if fire-all? (keys window-state) (:extents state-event))]
+        fire-all? (or (:trigger/fire-all-extents? trigger) (not= (:event-type state-event) :new-segment))
+        fire-extents (if fire-all? (keys (:state window-state)) (:extents state-event))]
     (reduce
      (fn [t extent]
        (let [[lower-bound upper-bound] (we/bounds window-record extent)
@@ -485,6 +491,7 @@
                         :trigger-index trigger-index
                         :trigger-state trigger-state
                         :grouped? true
+                        :group-key group
                         :group group})
                       {:keys [window/id]} window
                       window-state (get-in state* [id :window-state group])
