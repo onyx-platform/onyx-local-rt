@@ -59,11 +59,18 @@
    (reduce
     (fn [result task-name]
       (let [tm (get-in env [:tasks task-name :event :onyx.core/task-map])
+            windows (get-in env [:tasks task-name :event :onyx.core/windows])
             inbox (get-in env [:tasks task-name :inbox])]
-        (if (= (:onyx/type tm) :output)
-          (let [outputs (get-in env [:tasks task-name :outputs])]
-            (assoc result task-name {:inbox inbox :outputs outputs}))
-          (assoc result task-name {:inbox inbox}))))
+        (cond-> result
+          (or (= (:onyx/type tm) :input)
+              (= (:onyx/type tm) :function))
+          (update task-name merge {:inbox inbox})
+
+          (= (:onyx/type tm) :output)
+          (update task-name merge {:inbox inbox :outputs (get-in env [:tasks task-name :outputs])})
+
+          (not (empty? windows))
+          (update task-name merge {:window-contents (i/get-window-contents (get-in env [:tasks task-name :event]))}))))
     {}
     (keys (:tasks env)))})
 

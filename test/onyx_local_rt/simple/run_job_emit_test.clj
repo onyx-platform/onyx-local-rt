@@ -1,4 +1,4 @@
-(ns onyx-local-rt.simple.run-job-grouped-test
+(ns onyx-local-rt.simple.run-job-emit-test
   (:require [onyx-local-rt.api :as api]
             [clojure.test :refer [deftest is testing]]))
 
@@ -12,6 +12,12 @@
                                                  event-type group-key] :as state-event} 
                     extent-state]
   (swap! test-states conj [group-key lower-bound upper-bound extent-state]))
+
+(defn emit-segment [event window trigger {:keys [lower-bound upper-bound event-type] :as state-event} extent-state]
+  {:event-type event-type
+   :window/id (:window/id window)
+   :trigger/id (:trigger/id trigger)
+   :state extent-state})
 
 (def job
   {:workflow [[:in :inc] [:inc :out]]
@@ -37,6 +43,7 @@
                :trigger/fire-all-extents? true
                :trigger/on :onyx.triggers/segment
                :trigger/id :my-trigger
+               :trigger/emit ::emit-segment
                :trigger/threshold [1 :elements]
                :trigger/sync ::update-atom!}]
    :lifecycles []})
@@ -67,11 +74,53 @@
                                                :event-time
                                                #inst "2015-09-13T03:08:00.830-00:00"}]]]}}}, 
 		  :out {:inbox [], 
-			:outputs [{:n 42 :my-key :a :event-time #inst "2015-09-13T03:00:00.829-00:00"} 
-				  {:n 85 :my-key :a :event-time #inst "2015-09-13T03:03:00.829-00:00"}
-				  {:n 86 :my-key :a :event-time #inst "2015-09-13T03:08:00.830-00:00"}
-				  {:n 5 :my-key :c :event-time #inst "2015-09-13T03:08:00.830-00:00"}]}, 
-		  :in {:inbox []}}}
+                        :outputs [{:n 42 :my-key :a :event-time #inst "2015-09-13T03:00:00.829-00:00"} 
+                                  {:n 85 :my-key :a :event-time #inst "2015-09-13T03:03:00.829-00:00"}
+                                  {:n 86 :my-key :a :event-time #inst "2015-09-13T03:08:00.830-00:00"}
+                                  {:n 5 :my-key :c :event-time #inst "2015-09-13T03:08:00.830-00:00"}
+                                  {:event-type :new-segment,
+                                   :window/id :collect-segments,
+                                   :trigger/id :my-trigger,
+                                   :state
+                                   [{:n 5,
+                                     :my-key :c,
+                                     :event-time #inst "2015-09-13T03:08:00.830-00:00"}]}
+                                  {:event-type :new-segment,
+                                   :window/id :collect-segments,
+                                   :trigger/id :my-trigger,
+                                   :state
+                                   [{:n 86,
+                                     :my-key :a,
+                                     :event-time #inst "2015-09-13T03:08:00.830-00:00"}]}
+                                  {:event-type :new-segment,
+                                   :window/id :collect-segments,
+                                   :trigger/id :my-trigger,
+                                   :state
+                                   [{:n 42,
+                                     :my-key :a,
+                                     :event-time #inst "2015-09-13T03:00:00.829-00:00"}
+                                    {:n 85,
+                                     :my-key :a,
+                                     :event-time #inst "2015-09-13T03:03:00.829-00:00"}]}
+                                  {:event-type :new-segment,
+                                   :window/id :collect-segments,
+                                   :trigger/id :my-trigger,
+                                   :state
+                                   [{:n 42,
+                                     :my-key :a,
+                                     :event-time #inst "2015-09-13T03:00:00.829-00:00"}
+                                    {:n 85,
+                                     :my-key :a,
+                                     :event-time #inst "2015-09-13T03:03:00.829-00:00"}]}
+                                  {:event-type :new-segment,
+                                   :window/id :collect-segments,
+                                   :trigger/id :my-trigger,
+                                   :state
+                                   [{:n 42,
+                                     :my-key :a,
+                                     :event-time
+                                     #inst "2015-09-13T03:00:00.829-00:00"}]}]}, 
+                                  :in {:inbox []}}}
 	 (-> (api/init job)
 	     (api/new-segment :in {:n 41 :my-key :a :event-time #inst "2015-09-13T03:00:00.829-00:00"})
 	     (api/new-segment :in {:n 84 :my-key :a :event-time #inst "2015-09-13T03:03:00.829-00:00"})
