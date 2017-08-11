@@ -4,7 +4,12 @@
             [onyx.lifecycles.lifecycle-compile :as lc]
             [onyx.flow-conditions.fc-compile :as fc]
             [onyx.flow-conditions.fc-routing :as r]
+            [onyx.state.memory]
+            [onyx.peer.grouping :refer [task-map->grouping-fn]]
+            [onyx.state.protocol.db :as db]
+            [onyx.windowing.window-compile :as wc]
             [onyx.windowing.window-extensions :as we]
+            [onyx.peer.window-state :as ws]
             [onyx.windowing.aggregation]
             [onyx.refinements]
             [onyx.triggers]
@@ -26,10 +31,6 @@
 (defn unqualify-map [m]
   (into {} (map (fn [[k v]] [(keyword (name k)) v]) m)))
 
-(defn grouped-task? [task-map]
-  (or (:onyx/group-by-key task-map)
-      (:onyx/group-by-fn task-map)))
-
 (defn only [coll]
   (when (next coll)
     (throw (ex-info "More than one element in collection, expected count of 1" {:coll coll})))
@@ -48,37 +49,6 @@
 (defn resolve-var [v]
   #?(:clj (var-get v))
   #?(:cljs v))
-
-(defn resolve-aggregation-calls [s]
-  (let [kw (if (sequential? s) (first s) s)]
-    (resolve-var (kw->fn kw))))
-
-(defn resolve-window-init [window calls]
-  (if-not (:aggregation/init calls)
-    (let [init (:window/init window)]
-      (when-not init
-        (throw (ex-info "No :window/init supplied, this is required for this aggregation" {:window window})))
-      (constantly init))
-    (:aggregation/init calls)))
-
-(defn compile-window [window]
-  (let [calls (resolve-aggregation-calls (:window/aggregation window))
-        init-fn (resolve-window-init window calls)]
-    {:window window
-     :window-record ((we/windowing-builder window) (unqualify-map window))
-     :resolved-aggregations calls
-     :init-fn init-fn}))
-
-(defn task-map->grouping-fn [task-map]
-  (if-let [group-key (:onyx/group-by-key task-map)]
-    (cond (keyword? group-key)
-          group-key
-          (sequential? group-key)
-          #(select-keys % group-key)
-          :else
-          #(get % group-key))
-    (if-let [group-fn (:onyx/group-by-fn task-map)]
-      (kw->fn group-fn))))
 
 (defn compile-before-task-start-functions [lifecycles task-name]
   (lc/compile-lifecycle-functions {:onyx.core/lifecycles lifecycles :onyx.core/task task-name} :lifecycle/before-task-start))
@@ -134,57 +104,51 @@
          :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
          :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task)))
 
-(defn windows->event-map
-  [{:keys [onyx.core/windows onyx.core/task] :as event}]
-  (let [compiled-windows
-        (map
-         compile-window
-         (filter (fn [window] (= (:window/task window) task)) windows))]
-    (update-in event [:onyx.core/compiled] assoc :windows compiled-windows)))
+(defn state-indices [windows triggers]
+  (into {}
+        (map (juxt identity identity)
+             (into (vec (sort (map :window/id windows)))
+                   (sort (map  (fn [{:keys [trigger/id trigger/window-id]}]
+                                 [id window-id])
+                              triggers))))))
 
-(defn resolve-trigger
-  [{:keys [trigger/sync trigger/refinement trigger/on trigger/window-id] :as trigger}]
-  (let [refinement-calls (resolve-var (kw->fn refinement))
-        trigger-calls (resolve-var (kw->fn on))]
-    (let [trigger (assoc trigger :trigger/id (make-uuid))
-          f-init-state (:trigger/init-state trigger-calls)]
-      (-> trigger
-          (assoc :trigger trigger)
-          (assoc :sync-fn (kw->fn sync))
-          (assoc :state (f-init-state trigger))
-          (assoc :init-state f-init-state)
-          (assoc :next-trigger-state (:trigger/next-state trigger-calls))
-          (assoc :trigger-fire? (:trigger/trigger-fire? trigger-calls))
-          (assoc :create-state-update (:refinement/create-state-update refinement-calls))
-          (assoc :apply-state-update (:refinement/apply-state-update refinement-calls))
-          map->TriggerState))))
+(defn add-windows-states [{:keys [onyx.core/windows onyx.core/triggers onyx.core/task-map state-store] :as event}]
+    (if-not (empty? windows) 
+      (assoc event 
+             :windows-states 
+             (let [indices (state-indices windows triggers)]
+               (mapv (fn [window]
+                       (wc/build-window-executor window triggers state-store indices task-map))
+                   windows)))
+      (assoc event :windows-states [])))
 
-(defn live-triggers [windows triggers]
-  (let [window-ids (into #{} (map :window/id windows))]
-    (filter
-     (fn [trigger]
-       (some #{(:trigger/window-id trigger)} window-ids))
-     triggers)))
+(defn unwrap-grouped-contents [grouped? contents] 
+  (if grouped?
+    contents
+    (first (vals contents))))
 
-(defn triggers->event-map
-  [{:keys [onyx.core/windows onyx.core/triggers onyx.core/task-map] :as event}]
-  (let [grouped? (grouped-task? task-map)
-        live-triggers (live-triggers windows triggers)
-        event (assoc-in event [:onyx.core/compiled :triggers] live-triggers)]
-    (reduce
-     (fn [event [{:keys [trigger/window-id] :as trigger} k]]
-       (let [t (resolve-trigger trigger)
-             f
-             (if grouped?
-               (fn [id window-state segment]
-                 (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])
-                       group (group-f segment)]
-                   (assoc-in window-state [id :trigger-states k group :trigger-state] t)))
-               (fn [id window-state]
-                 (assoc-in window-state [id :trigger-states k :trigger-state] t)))]
-         (assoc-in event [:onyx.core/compiled :build-trigger-fn k] f)))
-     event
-     (map vector live-triggers (range)))))
+(defn get-window-contents [{:keys [state-store onyx.core/windows grouping-fn]}]
+  (reduce (fn [m {:keys [window/id]}]
+            (assoc m 
+                   id 
+                   (->> (db/groups state-store id)
+                        (reduce (fn [m group]
+                                  (reduce (fn [m extent]
+                                            (update m 
+                                                    group 
+                                                    (fn [g] 
+                                                      (assoc (or g {}) 
+                                                             extent 
+                                                             (db/get-extent state-store id group extent)))))
+                                          m
+                                          (db/group-extents state-store id group)))       
+                                {})
+                        (unwrap-grouped-contents (boolean grouping-fn)))))
+          {}
+          windows))
+
+(defn add-state-store [event]
+  (assoc event :state-store (db/create-db {:onyx.peer/state-store-impl :memory} :db {})))
 
 (defn task-params->event-map [{:keys [onyx.core/task-map] :as event}]
   (let [params (mapv (fn [param] (get task-map param))
@@ -201,10 +165,9 @@
    :lifecycle/read-batch :lifecycle/after-read-batch 
    :lifecycle/after-read-batch :lifecycle/apply-fn
    :lifecycle/apply-fn :lifecycle/after-apply-fn
-   :lifecycle/after-apply-fn :lifecycle/route-flow-conditions
-   :lifecycle/route-flow-conditions :lifecycle/assign-windows
-   :lifecycle/assign-windows :lifecycle/fire-triggers
-   :lifecycle/fire-triggers :lifecycle/write-batch
+   :lifecycle/after-apply-fn :lifecycle/assign-windows
+   :lifecycle/assign-windows :lifecycle/route-flow-conditions
+   :lifecycle/route-flow-conditions :lifecycle/write-batch
    :lifecycle/write-batch :lifecycle/after-batch
    :lifecycle/after-batch :lifecycle/before-batch
    :lifecycle/after-task-stop :lifecycle/start-task?})
@@ -227,7 +190,7 @@
 (defmethod apply-action :lifecycle/before-batch
   [env task action]
   (let [f (get-in task [:event :onyx.core/compiled :compiled-before-batch-fn])
-        event (dissoc (:event task) :onyx.core/batch :onyx.core/results)]
+        event (dissoc (:event task) :onyx.core/batch :onyx.core/results :onyx.core/triggered)]
     {:task (assoc task :event (merge event (f event)))}))
 
 (defmethod apply-action :lifecycle/read-batch
@@ -277,7 +240,7 @@
 
 (defmethod apply-action :lifecycle/route-flow-conditions
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/compiled]} event
+  (let [{:keys [onyx.core/results onyx.core/compiled onyx.core/triggered]} event
         reified-results
         (reduce
          (fn [all {:keys [old all-new] :as outgoing-message}]
@@ -296,50 +259,11 @@
               all
               all-new)))
          []
-         results)]
+         (conj results {:old nil :all-new triggered}))]
     {:task (assoc-in task [:event :onyx.core/results] reified-results)}))
 
-(defn default-state-value 
-  [init-fn window state-value]
-  (or state-value (init-fn window)))
-
-(defn apply-extent-operations [window-record window init-fn resolved-calls state extent-operations segment]
-  (let [create-state-update (:aggregation/create-state-update resolved-calls)
-        apply-state-update (:aggregation/apply-state-update resolved-calls)
-        super-agg-fn (:aggregation/super-aggregation-fn resolved-calls)
-        updated-extents (distinct (map second (filter (fn [[op]] (= op :update)) extent-operations)))]
-    (reduce
-     (fn [{:keys [state] :as result} extent-operation]
-       (case (first extent-operation)
-         :update (let [extent (second extent-operation)
-                       extent-state (get state extent)
-                       extent-state (default-state-value init-fn window extent-state)
-                       transition-entry (create-state-update window extent-state segment)
-                       new-extent-state (apply-state-update window extent-state transition-entry)]
-                   (assoc-in result [:state extent] new-extent-state))
-
-         :merge-extents 
-         (let [[_ extent-1 extent-2 extent-merged] extent-operation
-               agg-merged (super-agg-fn window-record
-                                        (get state extent-1)
-                                        (get state extent-2))]
-           (-> result
-               (assoc-in [:state extent-merged] agg-merged)
-               (update :state dissoc extent-1)
-               (update :state dissoc extent-2)))
-
-         :alter-extents (let [[_ from-extent to-extent] extent-operation
-                              v (get state from-extent)]
-                          (-> result
-                              (assoc-in [:state to-extent] v)
-                              (update :state dissoc from-extent)))))
-
-     (assoc-in state [:state-event] {:extents updated-extents
-                                     :event-type :new-segment})
-     extent-operations)))
-
 (defn state-transition-fns [event state segment]
-  (if-let [f (get-in event [:onyx.core/compiled :grouping-fn])]
+  (if-let [f (get-in event [:grouping-fn])]
     (let [group (f segment)]
       {:state* (get state group)
        :group group
@@ -347,180 +271,33 @@
     {:state* state
      :ret-f (fn [v] v)}))
 
-(defn reduce-segments
-  [{:keys [window window-record init-fn resolved-aggregations]} window-state event outgoing-segments]
-  (reduce
-   (fn [state {:keys [segment] :as msg}]
-     (let [{:keys [state* ret-f]} (state-transition-fns event state segment)
-           segment-time (we/segment-time window-record segment)
-           all-extents (keys (:state state*))
-           operations (we/extent-operations window-record all-extents segment segment-time)
-           result (apply-extent-operations window-record window init-fn 
-                                           resolved-aggregations state* 
-                                           operations segment)]
-       (ret-f result)))
-   window-state
-   outgoing-segments))
-
-(defmulti next-window
-  (fn [compiled-window window-state event outgoing-segments]
-    (get-in compiled-window [:window :window/type])))
-
-(defmethod next-window :fixed
-  [compiled-window window-state event outgoing-segments]
-  (reduce-segments compiled-window window-state event outgoing-segments))
-
-(defmethod next-window :sliding
-  [compiled-window window-state event outgoing-segments]
-  (reduce-segments compiled-window window-state event outgoing-segments))
-
-(defmethod next-window :global
-  [compiled-window window-state event outgoing-segments]
-  (reduce-segments compiled-window window-state event outgoing-segments))
-
-(defmethod next-window :session
-  [compiled-window window-state event outgoing-segments]
-  (reduce-segments compiled-window window-state event outgoing-segments))
-
 (defmethod apply-action :lifecycle/assign-windows
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results]} event
-        new-state
-        (reduce
-         (fn [window-state {:keys [window-record window] :as w}]
-           (let [id (:window/id window)
-                 old-state (get-in window-state [id :window-state])
-                 next-state (next-window w old-state event results)]
-             (assoc-in window-state [id :window-state] next-state)))
-         (:onyx.core/window-states event)
-         (get-in event [:onyx.core/compiled :windows]))]
-    {:task (assoc-in task [:event :onyx.core/window-states] new-state)}))
-
-(defn trigger-extent [window window-state state-event event-results]
-  (let [{:keys [trigger-state extent]} state-event
-        {:keys [sync-fn trigger create-state-update apply-state-update]} trigger-state
-        extent-state (get (:state window-state) extent)
-        state-event (assoc state-event :extent-state extent-state)
-        entry (create-state-update trigger extent-state state-event)
-        new-extent-state (apply-state-update trigger extent-state entry)
-        state-event (-> state-event
-                        (assoc :next-state new-extent-state)
-                        (assoc :trigger-update entry))]
-    (sync-fn (:task-event state-event) window trigger state-event extent-state)
-    {:window-state (assoc-in window-state [:state extent] new-extent-state)}))
-
-(defn trigger [window window-record window-state state-event event-results]
-  (let [{:keys [trigger-index trigger-state]} state-event
-        {:keys [trigger next-trigger-state trigger-fire?]} trigger-state
-        old-trigger-state (:state trigger-state)
-        state-event (assoc state-event :window window)
-        new-trigger-state (next-trigger-state trigger old-trigger-state state-event)
-        fire-all? (or (:trigger/fire-all-extents? trigger) (not= (:event-type state-event) :new-segment))
-        fire-extents (if fire-all? (keys (:state window-state)) (:extents state-event))]
-    (reduce
-     (fn [t extent]
-       (let [[lower-bound upper-bound] (we/bounds window-record extent)
-             state-event (-> state-event
-                             (assoc :lower-bound lower-bound)
-                             (assoc :upper-bound upper-bound)
-                             (assoc :extent extent))]
-         (if (trigger-fire? trigger new-trigger-state state-event)
-           (let [rets (trigger-extent window window-state state-event event-results)]
-             (assoc t :window-state (:window-state rets)))
-           t)))
-     {:trigger-state (assoc trigger-state :state new-trigger-state)
-      :window-state window-state}
-     fire-extents)))
-
-(defn build-trigger-state [event window-id window-state results]
-  (let [grouping-f (get-in event [:onyx.core/compiled :grouping-fn])
-        k->f (get-in event [:onyx.core/compiled :build-trigger-fn])]
-    (cond (and (not grouping-f) (get-in window-state [window-id :trigger-states]))
-          window-state
-
-          (not grouping-f)
-          (reduce-kv (fn [state k f] (f window-id state)) window-state k->f)
-
-          :else
-          (reduce
-           (fn [state {:keys [segment]}]
-             (let [group (grouping-f segment)]
-               (if (get-in state [window-id :trigger-states 0 group])
-                 state
-                 (reduce-kv (fn [state* k f] (f window-id state* segment)) state k->f))))
-           window-state
-           results))))
-
-(defn update-trigger-ungrouped [event old-state window window-record results]
-  (reduce-kv
-   (fn [result trigger-index {:keys [trigger-state]}]
-     (if (= (get-in result [(:window/id window) :window-state :state-event :event-type])
-            :new-segment)
-       (let [state-event
-             (merge
-              (get-in result [(:window/id window) :window-state :state-event])
-              {:log-type :trigger
-               :trigger-index trigger-index
-               :trigger-state trigger-state})
-             {:keys [window/id]} window
-             window-state (get-in result [(:window/id window) :window-state])
-             rets (trigger window window-record window-state state-event results)]
-         (-> result
-             (assoc-in [id :trigger-states trigger-index :trigger-state] (:trigger-state rets))
-             (assoc-in [id :window-state] (:window-state rets))))
-       result))
-   old-state
-   (get-in old-state [(:window/id window) :trigger-states])))
-
-(defn update-trigger-grouped [event old-state window window-record results]
-  (let [group-f (get-in event [:onyx.core/compiled :grouping-fn])]
-    (reduce
-     (fn [state {:keys [segment] :as result}]
-       (let [group (group-f segment)]
-         (reduce-kv
-          (fn [state* trigger-index groups]
-            (let [{:keys [trigger-state]} (get groups group)]
-              (if (= (get-in state* [(:window/id window) :window-state
-                                     group :state-event :event-type])
-                     :new-segment)
-                (let [state-event
-                      (merge
-                       (get-in state* [(:window/id window) :window-state
-                                       group :state-event])
-                       {:log-type :trigger
-                        :trigger-index trigger-index
-                        :trigger-state trigger-state
-                        :grouped? true
-                        :group-key group
-                        :group group})
-                      {:keys [window/id]} window
-                      window-state (get-in state* [id :window-state group])
-                      rets (trigger window window-record window-state state-event results)]
-                  (-> state*
-                      (assoc-in [id :trigger-states trigger-index group :trigger-state] (:trigger-state rets))
-                      (assoc-in [id :window-state group] (:window-state rets))))
-                state*)))
-          state
-          (get-in old-state [(:window/id window) :trigger-states]))))
-     old-state
-     results)))
-
-(defmethod apply-action :lifecycle/fire-triggers
-  [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/compiled]} event
-        grouped? (:grouping-fn compiled)]
-    (if (seq results)
-      (let [new-state
-            (reduce
-             (fn [window-states {:keys [window window-record]}]
-               (let [window-id (:window/id window)
-                     old-state (build-trigger-state event window-id window-states results)
-                     update-f (if grouped? update-trigger-grouped update-trigger-ungrouped)]
-                 (update-f event old-state window window-record results)))
-             (:onyx.core/window-states event)
-             (get-in event [:onyx.core/compiled :windows]))]
-        {:task (assoc-in task [:event :onyx.core/window-states] new-state)})
-      {:task task})))
+  (let [state-event (onyx.types/new-state-event :new-segment event)
+        {:keys [grouping-fn onyx.core/results windows-states state-store]} event
+        grouped? (not (nil? grouping-fn))
+        state-event* (assoc state-event :grouped? grouped?)
+        updated-states (reduce 
+                        (fn [windows-state* segment]
+                          (if (exception? segment)
+                            windows-state*
+                            (let [state-event** (if grouped?
+                                                  (let [group-key (grouping-fn segment)]
+                                                    (-> state-event* 
+                                                        (assoc :segment segment)
+                                                        (assoc :group-id (db/group-id state-store group-key))
+                                                        (assoc :group-key group-key)))
+                                                  (assoc state-event* :segment segment))]
+                              (ws/fire-state-event windows-state* state-event**))))
+                        windows-states
+                        (mapcat :all-new results))
+        emitted (doall (mapcat (comp deref :emitted) updated-states))]
+    (run! (fn [w] (reset! (:emitted w) [])) updated-states)
+    {:task (-> task
+               (update :outputs into emitted)
+               (assoc :event (-> event 
+                                 (assoc :windows-states updated-states)
+                                 (update :onyx.core/triggered into emitted))))}))
 
 (defn route-to-children [results]
   (reduce
@@ -535,7 +312,7 @@
 
 (defmethod apply-action :lifecycle/write-batch
   [env {:keys [event children] :as task} action]
-  (let [{:keys [onyx.core/results]} event]
+  (let [{:keys [onyx.core/results onyx.core/triggered]} event]
     (cond (not (seq children))
           {:task (update-in task [:outputs] into (mapv :segment results))
            :writes {}}
@@ -585,16 +362,16 @@
                           :onyx.core/catalog catalog
                           :onyx.core/lifecycles lifecycles
                           :onyx.core/flow-conditions flow-conditions
-                          :onyx.core/windows windows
+                          :onyx.core/windows (filterv #(= (:window/task %) task-name) windows)
                           :onyx.core/triggers triggers
                           :onyx.core/task-map catalog-entry
                           :onyx.core/fn (precompile-onyx-fn catalog-entry)
-                          :onyx.core/compiled
-                          {:grouping-fn (task-map->grouping-fn catalog-entry)}}
+                          :grouping-fn (task-map->grouping-fn catalog-entry)
+                          :onyx.core/compiled {}}
                          (lifecycles->event-map)
                          (flow-conditions->event-map)
-                         (windows->event-map)
-                         (triggers->event-map)
+                         (add-state-store)
+                         (add-windows-states)
                          (task-params->event-map)
                          (egress-tasks->event-map children))}]
     (if (seq children)

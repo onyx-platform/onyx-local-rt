@@ -44,7 +44,28 @@
 (deftest run-job-test
   (reset! test-states [])
   (is (= {:next-action :lifecycle/start-task?, 
-	  :tasks {:inc {:inbox []}, 
+	  :tasks {:inc {:inbox []
+                        :window-contents {:collect-segments
+                                          {:c
+                                           {[1442113680830 1442113680830]
+                                             [{:n 5,
+                                               :my-key :c,
+                                               :event-time
+                                               #inst "2015-09-13T03:08:00.830-00:00"}]},
+                                           :a
+                                           {[1442113200829 1442113380829]
+                                             [{:n 42,
+                                               :my-key :a,
+                                               :event-time #inst "2015-09-13T03:00:00.829-00:00"}
+                                              {:n 85,
+                                               :my-key :a,
+                                               :event-time
+                                               #inst "2015-09-13T03:03:00.829-00:00"}]
+                                            [1442113680830 1442113680830]
+                                             [{:n 86,
+                                               :my-key :a,
+                                               :event-time
+                                               #inst "2015-09-13T03:08:00.830-00:00"}]}}}}, 
 		  :out {:inbox [], 
 			:outputs [{:n 42 :my-key :a :event-time #inst "2015-09-13T03:00:00.829-00:00"} 
 				  {:n 85 :my-key :a :event-time #inst "2015-09-13T03:03:00.829-00:00"}
@@ -53,18 +74,17 @@
 		  :in {:inbox []}}}
 	 (-> (api/init job)
 	     (api/new-segment :in {:n 41 :my-key :a :event-time #inst "2015-09-13T03:00:00.829-00:00"})
-	     (api/drain)
 	     (api/new-segment :in {:n 84 :my-key :a :event-time #inst "2015-09-13T03:03:00.829-00:00"})
-	     (api/drain)
 	     (api/new-segment :in {:n 85 :my-key :a :event-time #inst "2015-09-13T03:08:00.830-00:00"})
-	     (api/drain)
 	     (api/new-segment :in {:n 4 :my-key :c :event-time #inst "2015-09-13T03:08:00.830-00:00"})
 	     (api/drain)
 	     (api/stop)
 	     (api/env-summary))))
   (is (= [[:a 1442113200829 1442113200829 [{:n 42, :my-key :a, :event-time #inst  "2015-09-13T03:00:00.829-00:00"}]] 
-	  [:a 1442113200829 1442113380829 [{:n 42, :my-key :a, :event-time #inst  "2015-09-13T03:00:00.829-00:00"} {:n 85, :my-key :a, :event-time #inst  "2015-09-13T03:03:00.829-00:00"}]]
-	  [:a 1442113200829 1442113380829 [{:n 42, :my-key :a, :event-time #inst  "2015-09-13T03:00:00.829-00:00"} {:n 85, :my-key :a, :event-time #inst  "2015-09-13T03:03:00.829-00:00"}]]
+	  [:a 1442113200829 1442113380829 [{:n 42, :my-key :a, :event-time #inst  "2015-09-13T03:00:00.829-00:00"} 
+                                           {:n 85, :my-key :a, :event-time #inst  "2015-09-13T03:03:00.829-00:00"}]]
+	  [:a 1442113200829 1442113380829 [{:n 42, :my-key :a, :event-time #inst  "2015-09-13T03:00:00.829-00:00"} 
+                                           {:n 85, :my-key :a, :event-time #inst  "2015-09-13T03:03:00.829-00:00"}]]
 	  [:a 1442113680830 1442113680830 [{:n 86, :my-key :a, :event-time #inst  "2015-09-13T03:08:00.830-00:00"}]] 
 	  [:c 1442113680830 1442113680830 [{:n 5, :my-key :c, :event-time #inst "2015-09-13T03:08:00.830-00:00"}]]]
 	 @test-states)))

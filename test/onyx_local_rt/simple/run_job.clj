@@ -39,7 +39,12 @@
 (deftest run-job-test
   (reset! test-states [])
    (is (= {:next-action :lifecycle/start-task?, 
-          :tasks {:inc {:inbox []}, 
+           :tasks {:inc {:inbox []
+                         :window-contents
+                         {:collect-segments
+                          {1 [{:n 42, :my-key :a}
+                             {:n 85, :my-key :a}
+                             {:n 5, :my-key :c}]}}}, 
                   :out {:inbox [], 
                         :outputs [{:n 42 :my-key :a} 
                                   {:n 85 :my-key :a}
@@ -52,5 +57,7 @@
              (api/drain)
              (api/stop)
              (api/env-summary))))
-   (is (= [[{:n 42, :my-key :a}  {:n 85, :my-key :a}  {:n 5, :my-key :c}]]
+   (is (= [[{:n 42, :my-key :a}]
+           [{:n 42, :my-key :a} {:n 85, :my-key :a}]
+           [{:n 42, :my-key :a} {:n 85, :my-key :a} {:n 5, :my-key :c}]]
 	  @test-states)))
