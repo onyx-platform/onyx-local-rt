@@ -42,10 +42,9 @@
            :tasks {:inc {:inbox []
                          :window-contents
                          {:collect-segments
-                          [[1
-                            [{:n 42, :my-key :a}
+                          {1 [{:n 42, :my-key :a}
                              {:n 85, :my-key :a}
-                             {:n 5, :my-key :c}]]]}}, 
+                             {:n 5, :my-key :c}]}}}, 
                   :out {:inbox [], 
                         :outputs [{:n 42 :my-key :a} 
                                   {:n 85 :my-key :a}
