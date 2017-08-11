@@ -104,23 +104,11 @@
          :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
          :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task)))
 
-(defn trigger-state-index-id [{:keys [trigger/id trigger/window-id]}]
-  [id window-id])
-
-(defn state-indices [windows triggers]
-   (assert (= 1 (count (distinct (map :window/task windows)))))
-   (into {} 
-         (map (juxt identity identity) 
-              (into (vec (sort (map :window/id windows)))
-                    (sort (map  (fn [{:keys [trigger/id trigger/window-id]}]
-                                  [id window-id])
-                               triggers))))))
-
 (defn add-windows-states [{:keys [onyx.core/windows onyx.core/triggers onyx.core/task-map state-store] :as event}]
     (if-not (empty? windows) 
       (assoc event 
              :windows-states 
-             (let [indices (state-indices windows triggers)]
+             (let [indices (wc/state-indices windows triggers)]
                (mapv (fn [window]
                        (wc/build-window-executor window triggers state-store indices task-map))
                    windows)))
