@@ -33,7 +33,6 @@
               :window/timeout-gap [5 :minutes]
               :window/aggregation :onyx.windowing.aggregation/conj}]
    :triggers [{:trigger/window-id :collect-segments
-               :trigger/refinement :onyx.refinements/accumulating
                :trigger/fire-all-extents? true
                :trigger/on :onyx.triggers/segment
                :trigger/id :my-trigger

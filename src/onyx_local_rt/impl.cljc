@@ -122,30 +122,44 @@
                    windows)))
       (assoc event :windows-states [])))
 
-(defn unwrap-grouped-contents [grouped? contents] 
-  (if grouped?
-    contents
-    (first (vals contents))))
-
-(defn get-window-contents [{:keys [state-store onyx.core/windows grouping-fn]}]
+(defn grouped-window-contents [{:keys [state-store onyx.core/windows]}]
   (reduce (fn [m {:keys [window/id]}]
             (assoc m 
                    id 
-                   (->> (db/groups state-store id)
-                        (reduce (fn [m group]
-                                  (reduce (fn [m extent]
-                                            (update m 
-                                                    group 
-                                                    (fn [g] 
-                                                      (assoc (or g {}) 
-                                                             extent 
-                                                             (db/get-extent state-store id group extent)))))
-                                          m
-                                          (db/group-extents state-store id group)))       
-                                {})
-                        (unwrap-grouped-contents (boolean grouping-fn)))))
+                   (reduce (fn [m group]
+                             (let [group-id (db/group-id state-store group)]
+                               (reduce (fn [m extent]
+                                         (update m 
+                                                 group 
+                                                 (fn [g] 
+                                                   (assoc (or g {}) 
+                                                          extent 
+                                                          (db/get-extent state-store id group-id extent)))))
+                                       m
+                                       (db/group-extents state-store id group-id))))
+                           {}
+                           (db/groups state-store))))
           {}
           windows))
+
+(defn ungrouped-window-contents [{:keys [state-store onyx.core/windows]}]
+  (reduce (fn [m {:keys [window/id]}]
+            (assoc m 
+                   id 
+                   (let [group nil] 
+                     (reduce (fn [m extent]
+                               (assoc m
+                                      extent 
+                                      (db/get-extent state-store id group extent)))
+                             {}
+                             (db/group-extents state-store id group)))))
+          {}
+          windows))
+
+(defn get-window-contents [{:keys [grouping-fn] :as event}]
+  (if grouping-fn
+    (grouped-window-contents event)
+    (ungrouped-window-contents event)))
 
 (defn add-state-store [event]
   (assoc event :state-store (db/create-db {:onyx.peer/state-store-impl :memory} :db {})))
