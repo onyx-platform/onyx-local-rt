@@ -126,17 +126,16 @@
   (reduce (fn [m {:keys [window/id]}]
             (assoc m 
                    id 
-                   (reduce (fn [m group]
-                             (let [group-id (db/group-id state-store group)]
-                               (reduce (fn [m extent]
-                                         (update m 
-                                                 group 
-                                                 (fn [g] 
-                                                   (assoc (or g {}) 
-                                                          extent 
-                                                          (db/get-extent state-store id group-id extent)))))
-                                       m
-                                       (db/group-extents state-store id group-id))))
+                   (reduce (fn [m [group-id group]]
+                             (reduce (fn [m extent]
+                                       (update m 
+                                               group 
+                                               (fn [g] 
+                                                 (assoc (or g {}) 
+                                                        extent 
+                                                        (db/get-extent state-store id group-id extent)))))
+                                     m
+                                     (db/group-extents state-store id group-id)))
                            {}
                            (db/groups state-store))))
           {}
