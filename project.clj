@@ -13,7 +13,7 @@
                              :sign-releases false}}
   :dependencies [[org.clojure/clojure "1.9.0-alpha20"]
                  ^{:voom {:repo "git@github.com:onyx-platform/onyx.git" :branch "master"}}
-                 [org.onyxplatform/onyx "0.11.2-20171103_040229-gb37a1ef"]
+                 [org.onyxplatform/onyx "0.11.2-20171103_044210-g7d3fb46"]
                  [org.onyxplatform/onyx-spec "0.11.0.0-alpha3"]
                  [com.stuartsierra/dependency "0.2.0"]]
   :plugins [[codox "0.8.8"]
