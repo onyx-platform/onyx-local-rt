@@ -17,7 +17,7 @@
             [onyx.types :refer [map->TriggerState]]
             [onyx.spec]))
 
-(defn fake-plugins [catalog]
+(defn fake-required-task-options [catalog]
   (mapv (fn [task] 
           (cond-> task 
             (#{:output :input} (:onyx/type task))
@@ -32,7 +32,7 @@
 (defn validate-job [job]
   (-> job
       (assoc :task-scheduler :onyx.task-scheduler/local-rt)
-      (update :catalog fake-plugins)
+      (update :catalog fake-required-task-options)
       (validate/validate-job-schema)))
 
 (defn takev [k xs]
