@@ -253,7 +253,7 @@
 
 (defmethod apply-action :lifecycle/route-flow-conditions
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/compiled onyx.core/triggered]} event
+  (let [{:keys [onyx.core/results onyx.core/triggered]} event
         reified-results
         (reduce
          (fn [all {:keys [old all-new] :as outgoing-message}]
@@ -261,7 +261,7 @@
                  root old]
              (reduce
               (fn [all* new-msg]
-                (let [routes (r/route-data event {:root root :leaves leaves} new-msg)
+                (let [routes (r/route-data event root leaves new-msg)
                       transformed-msg (r/flow-conditions-transform new-msg routes event)]
                   (when (and (exception? new-msg)
                              (not (seq (:flow routes))))
@@ -290,6 +290,7 @@
         {:keys [grouping-fn onyx.core/results windows-states state-store]} event
         grouped? (not (nil? grouping-fn))
         state-event* (assoc state-event :grouped? grouped?)
+        emitted (transient [])
         updated-states (reduce 
                         (fn [windows-state* segment]
                           (if (exception? segment)
@@ -301,16 +302,15 @@
                                                         (assoc :group-id (db/group-id state-store group-key))
                                                         (assoc :group-key group-key)))
                                                   (assoc state-event* :segment segment))]
-                              (ws/fire-state-event windows-state* state-event**))))
+                              (ws/fire-state-event windows-state* state-event** emitted))))
                         windows-states
                         (mapcat :all-new results))
-        emitted (doall (mapcat (comp deref :emitted) updated-states))]
-    (run! (fn [w] (reset! (:emitted w) [])) updated-states)
+        triggered (persistent! emitted)]
     {:task (-> task
-               (update :outputs into emitted)
+               (update :outputs into triggered)
                (assoc :event (-> event 
                                  (assoc :windows-states updated-states)
-                                 (update :onyx.core/triggered into emitted))))}))
+                                 (assoc :onyx.core/triggered triggered))))}))
 
 (defn route-to-children [results]
   (reduce
@@ -325,7 +325,7 @@
 
 (defmethod apply-action :lifecycle/write-batch
   [env {:keys [event children] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/triggered]} event]
+  (let [{:keys [onyx.core/results]} event]
     (cond (not (seq children))
           {:task (update-in task [:outputs] into (mapv :segment results))
            :writes {}}
