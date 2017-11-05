@@ -17,13 +17,14 @@
             [onyx.types :refer [map->TriggerState]]
             [onyx.spec]))
 
-(defn fake-plugins [catalog windowed]
+(defn fake-plugins [catalog]
   (mapv (fn [task] 
           (cond-> task 
             (#{:output :input} (:onyx/type task))
             (assoc :onyx/plugin :onyx.local-rt/fake-plugin
                    :onyx/medium :local-rt)
-            (windowed (:onyx/name task))
+            (or (:onyx/group-by-fn task)
+                (:onyx/group-by-key task))
             (assoc :onyx/n-peers 1
                    :onyx/flux-policy :recover)))
         catalog))
@@ -31,7 +32,7 @@
 (defn validate-job [job]
   (-> job
       (assoc :task-scheduler :onyx.task-scheduler/local-rt)
-      (update :catalog fake-plugins (set (map :window/task (:windows job))))
+      (update :catalog fake-plugins)
       (validate/validate-job-schema)))
 
 (defn takev [k xs]
