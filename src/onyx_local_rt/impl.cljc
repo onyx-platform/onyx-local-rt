@@ -118,10 +118,13 @@
          event)))
 
 (defn flow-conditions->event-map
-  [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event}]
-  (assoc event
-         :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
-         :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task)))
+  [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event} children]
+  (let [fc-exception-paths (fc/compile-fc-exception-path flow-conditions workflow task)] 
+    (assoc event
+           :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
+           :compiled-non-ex-routes (remove (set (mapcat :flow/to fc-exception-paths)) 
+                                           children)
+           :compiled-ex-fcs fc-exception-paths)))
 
 (defn state-indices [windows triggers]
   (into {}
@@ -401,7 +404,7 @@
                           :grouping-fn (task-map->grouping-fn catalog-entry)
                           :onyx.core/compiled {}}
                          (lifecycles->event-map)
-                         (flow-conditions->event-map)
+                         (flow-conditions->event-map children)
                          (add-state-store)
                          (add-windows-states)
                          (task-params->event-map)
