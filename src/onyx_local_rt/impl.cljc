@@ -11,10 +11,28 @@
             [onyx.windowing.window-extensions :as we]
             [onyx.peer.window-state :as ws]
             [onyx.windowing.aggregation]
+            [onyx.static.validation :as validate]
             [onyx.refinements]
             [onyx.triggers]
             [onyx.types :refer [map->TriggerState]]
             [onyx.spec]))
+
+(defn fake-plugins [catalog windowed]
+  (mapv (fn [task] 
+          (cond-> task 
+            (#{:output :input} (:onyx/type task))
+            (assoc :onyx/plugin :onyx.local-rt/fake-plugin
+                   :onyx/medium :local-rt)
+            (windowed (:onyx/name task))
+            (assoc :onyx/n-peers 1
+                   :onyx/flux-policy :recover)))
+        catalog))
+
+(defn validate-job [job]
+  (-> job
+      (assoc :task-scheduler :onyx.task-scheduler/local-rt)
+      (update :catalog fake-plugins (set (map :window/task (:windows job))))
+      (validate/validate-job-schema)))
 
 (defn takev [k xs]
   (vec (take k xs)))
