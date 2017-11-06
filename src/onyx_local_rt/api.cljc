@@ -6,6 +6,7 @@
 (defn init
   "Takes an Onyx job and returns a new runtime instance."
   [{:keys [workflow] :as job}]
+  (i/validate-job job)
   (let [graph (i/workflow->sierra-graph workflow)]
     {:tasks (i/init-task-states job graph)
      :sorted-tasks (dep/topo-sort graph)

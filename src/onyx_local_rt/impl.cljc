@@ -11,10 +11,29 @@
             [onyx.windowing.window-extensions :as we]
             [onyx.peer.window-state :as ws]
             [onyx.windowing.aggregation]
+            [onyx.static.validation :as validate]
             [onyx.refinements]
             [onyx.triggers]
             [onyx.types :refer [map->TriggerState]]
             [onyx.spec]))
+
+(defn fake-required-task-options [catalog]
+  (mapv (fn [task] 
+          (cond-> task 
+            (#{:output :input} (:onyx/type task))
+            (assoc :onyx/plugin :onyx.local-rt/fake-plugin
+                   :onyx/medium :local-rt)
+            (or (:onyx/group-by-fn task)
+                (:onyx/group-by-key task))
+            (assoc :onyx/n-peers 1
+                   :onyx/flux-policy :recover)))
+        catalog))
+
+(defn validate-job [job]
+  (-> job
+      (assoc :task-scheduler :onyx.task-scheduler/local-rt)
+      (update :catalog fake-required-task-options)
+      (validate/validate-job-schema)))
 
 (defn takev [k xs]
   (vec (take k xs)))
@@ -99,10 +118,13 @@
          event)))
 
 (defn flow-conditions->event-map
-  [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event}]
-  (assoc event
-         :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
-         :compiled-ex-fcs (fc/compile-fc-exception-path flow-conditions workflow task)))
+  [{:keys [onyx.core/flow-conditions onyx.core/workflow onyx.core/task] :as event} children]
+  (let [fc-exception-paths (fc/compile-fc-exception-path flow-conditions workflow task)] 
+    (assoc event
+           :compiled-norm-fcs (fc/compile-fc-happy-path flow-conditions workflow task)
+           :compiled-non-ex-routes (remove (set (mapcat :flow/to fc-exception-paths)) 
+                                           children)
+           :compiled-ex-fcs fc-exception-paths)))
 
 (defn state-indices [windows triggers]
   (into {}
@@ -253,7 +275,7 @@
 
 (defmethod apply-action :lifecycle/route-flow-conditions
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/compiled onyx.core/triggered]} event
+  (let [{:keys [onyx.core/results onyx.core/triggered]} event
         reified-results
         (reduce
          (fn [all {:keys [old all-new] :as outgoing-message}]
@@ -261,7 +283,7 @@
                  root old]
              (reduce
               (fn [all* new-msg]
-                (let [routes (r/route-data event {:root root :leaves leaves} new-msg)
+                (let [routes (r/route-data event root leaves new-msg)
                       transformed-msg (r/flow-conditions-transform new-msg routes event)]
                   (when (and (exception? new-msg)
                              (not (seq (:flow routes))))
@@ -290,6 +312,7 @@
         {:keys [grouping-fn onyx.core/results windows-states state-store]} event
         grouped? (not (nil? grouping-fn))
         state-event* (assoc state-event :grouped? grouped?)
+        emitted (transient [])
         updated-states (reduce 
                         (fn [windows-state* segment]
                           (if (exception? segment)
@@ -301,16 +324,15 @@
                                                         (assoc :group-id (db/group-id state-store group-key))
                                                         (assoc :group-key group-key)))
                                                   (assoc state-event* :segment segment))]
-                              (ws/fire-state-event windows-state* state-event**))))
+                              (ws/fire-state-event windows-state* state-event** emitted))))
                         windows-states
                         (mapcat :all-new results))
-        emitted (doall (mapcat (comp deref :emitted) updated-states))]
-    (run! (fn [w] (reset! (:emitted w) [])) updated-states)
+        triggered (persistent! emitted)]
     {:task (-> task
-               (update :outputs into emitted)
+               (update :outputs into triggered)
                (assoc :event (-> event 
                                  (assoc :windows-states updated-states)
-                                 (update :onyx.core/triggered into emitted))))}))
+                                 (assoc :onyx.core/triggered triggered))))}))
 
 (defn route-to-children [results]
   (reduce
@@ -325,7 +347,7 @@
 
 (defmethod apply-action :lifecycle/write-batch
   [env {:keys [event children] :as task} action]
-  (let [{:keys [onyx.core/results onyx.core/triggered]} event]
+  (let [{:keys [onyx.core/results]} event]
     (cond (not (seq children))
           {:task (update-in task [:outputs] into (mapv :segment results))
            :writes {}}
@@ -382,7 +404,7 @@
                           :grouping-fn (task-map->grouping-fn catalog-entry)
                           :onyx.core/compiled {}}
                          (lifecycles->event-map)
-                         (flow-conditions->event-map)
+                         (flow-conditions->event-map children)
                          (add-state-store)
                          (add-windows-states)
                          (task-params->event-map)
