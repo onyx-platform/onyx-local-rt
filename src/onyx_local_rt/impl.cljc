@@ -306,9 +306,11 @@
     {:state* state
      :ret-f (fn [v] v)}))
 
+(def fixed-barrier-epoch 1)
+
 (defmethod apply-action :lifecycle/assign-windows
   [env {:keys [event] :as task} action]
-  (let [state-event (onyx.types/new-state-event :new-segment event)
+  (let [state-event (onyx.types/new-state-event :new-segment event fixed-barrier-epoch)
         {:keys [grouping-fn onyx.core/results windows-states state-store]} event
         grouped? (not (nil? grouping-fn))
         state-event* (assoc state-event :grouped? grouped?)
