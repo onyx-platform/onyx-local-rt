@@ -1,4 +1,4 @@
-(defproject org.onyxplatform/onyx-local-rt "0.12.0.0-SNAPSHOT"
+(defproject org.onyxplatform/onyx-local-rt "0.12.0.1-SNAPSHOT"
   :description "A local, pure, deterministic runtime for Onyx"
   :url "https://github.com/onyx-platform/onyx-local-rt"
   :license {:name "Eclipse Public License"
@@ -13,7 +13,7 @@
                              :sign-releases false}}
   :dependencies [[org.clojure/clojure "1.9.0-alpha20"]
                  ^{:voom {:repo "git@github.com:onyx-platform/onyx.git" :branch "master"}}
-                 [org.onyxplatform/onyx "0.12.1-20171205_035455-g43ccedb"]
+                 [org.onyxplatform/onyx "0.12.0"]
                  [org.onyxplatform/onyx-spec "0.11.0.0-alpha3"]
                  [com.stuartsierra/dependency "0.2.0"]]
   :plugins [[codox "0.8.8"]
