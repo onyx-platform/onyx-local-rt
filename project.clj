@@ -1,4 +1,4 @@
-(defproject org.onyxplatform/onyx-local-rt "0.12.2.1"
+(defproject org.onyxplatform/onyx-local-rt "0.12.2.2-SNAPSHOT"
   :description "A local, pure, deterministic runtime for Onyx"
   :url "https://github.com/onyx-platform/onyx-local-rt"
   :license {:name "Eclipse Public License"
