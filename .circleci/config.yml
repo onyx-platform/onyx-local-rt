@@ -1,7 +1,7 @@
 version: 2
 executorType: docker
 jobs:
-  build:
+  test:
     docker:
       - image: circleci/clojure:lein-2.8.1
     working_directory: ~/repo
