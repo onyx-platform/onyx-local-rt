@@ -26,7 +26,7 @@ code will be moved into Onyx core at a later date.
 In your `project.clj`:
 
 ```
-[org.onyxplatform/onyx-local-rt "0.13.5.1-SNAPSHOT"]
+[org.onyxplatform/onyx-local-rt "0.14.0.0"]
 ```
 
 First, Require the only file, `api.cljc`, and define any functions that will be used.
