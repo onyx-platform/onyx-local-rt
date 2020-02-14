@@ -261,16 +261,19 @@
 
 (defmethod apply-action :lifecycle/apply-fn
   [env {:keys [event] :as task} action]
-  (let [{:keys [onyx.core/batch onyx.core/params]} event]
+  (let [{:keys [onyx.core/batch onyx.core/params onyx.core/task-map]} event]
     {:task
      (if (seq batch)
-       (let [f (curry-params (:onyx.core/fn event) params)
-             results (mapv
+       (let [f (curry-params (:onyx.core/fn event) params)]
+         (assoc-in task
+                   [:event :onyx.core/results]
+                   (if (:onyx/batch-fn? task-map)
+                     [{:old batch :all-new (collect-next-segments f batch)}]
+                     (mapv
                       (fn [old]
                         (let [all-new (collect-next-segments f old)]
                           {:old old :all-new all-new}))
-                      batch)]
-         (assoc-in task [:event :onyx.core/results] results))
+                      batch))))
        task)}))
 
 (defmethod apply-action :lifecycle/route-flow-conditions
