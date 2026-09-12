@@ -35,7 +35,7 @@ move the runtime forward (`tick`), move the runtime forward until all in-flight 
 reached their outputs (`drain`), or simulate the job shutting down (`stop`). All API functions
 take and return the runtime.
 
-View the API on [GitHub Pages](http://www.onyxplatform.org/onyx-local-rt/).
+View the API on [GitHub Pages](https://onyx-platform.github.io/onyx-local-rt/).
 
 As an example for Clojure(Script):
 
